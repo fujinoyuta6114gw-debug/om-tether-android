@@ -205,4 +205,5 @@ data class CaptureObjectSummary(
 data class CaptureReport(
     val objects: List<CaptureObjectSummary>,
     val warnings: List<String> = emptyList(),
+    val previewJpegFallbackUsed: Boolean = false,
 )
