@@ -40,6 +40,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 
 enum class ConnectionPhase {
     DISCONNECTED,
@@ -77,6 +78,7 @@ data class MainUiState(
     val highlightThreshold: Float = 0.97f,
     val highlightPercent: Float = 0f,
     val exposureControls: List<ExposureControl> = emptyList(),
+    val exposureSyncActive: Boolean = false,
     val phoneSaveFormat: PhoneSaveFormat = PhoneSaveFormat.JPEG,
     val isCapturing: Boolean = false,
     val lastCapture: LastCapture? = null,
@@ -113,6 +115,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var captureJob: Job? = null
     private var lifecycleJob: Job? = null
     private var liveViewWatchdogJob: Job? = null
+    private var exposureSyncJob: Job? = null
     private var frameGeneration = 0L
     private var liveViewStartedAt = 0L
     private var lastLiveFrameReceivedAt = 0L
@@ -465,36 +468,30 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun diagnosticsText(): String = controller?.diagnosticsText()
-        ?: "OM Tether 0.3.0\nCamera controller is not active."
+        ?: "OM Tether 0.3.1\nCamera controller is not active."
 
     fun restartLiveView() {
-        val requestedController = controller ?: return
-        if (requestedController is MockCameraController) return
-        lifecycleJob?.cancel()
-        lifecycleJob = viewModelScope.launch {
-            cameraOperationMutex.withLock {
-                if (controller !== requestedController) return@withLock
-                mutableState.update {
-                    it.copy(
-                        liveViewIssue = null,
-                        statusMessage = "ライブビューを再開しています…",
-                    )
-                }
-                try {
-                    requestedController.stopLiveView()
-                    liveViewStartedAt = SystemClock.elapsedRealtime()
-                    lastLiveFrameReceivedAt = 0L
-                    requestedController.startLiveView()
-                } catch (error: CancellationException) {
-                    throw error
-                } catch (error: Throwable) {
-                    if (controller === requestedController) {
-                        val message = "ライブビュー再開エラー: ${error.userMessage()}"
-                        mutableState.update { it.copy(liveViewIssue = message, statusMessage = message) }
-                    }
-                }
+        if (controller is MockCameraController) return
+        val device = usbManager.deviceList.values.firstOrNull(::isOm1MarkII)
+        if (device == null) {
+            mutableState.update {
+                it.copy(
+                    phase = ConnectionPhase.DISCONNECTED,
+                    exposureSyncActive = false,
+                    liveViewIssue = "OM‑1 Mark IIが見つかりません",
+                    statusMessage = "カメラを0 RAW/Controlで接続し直してください",
+                )
             }
+            return
         }
+        mutableState.update {
+            it.copy(
+                exposureSyncActive = false,
+                liveViewIssue = null,
+                statusMessage = "USB/PTPセッションを作り直しています…",
+            )
+        }
+        requestUsbPermissionOrConnect(device)
     }
 
     private fun requestUsbPermissionOrConnect(device: UsbDevice) {
@@ -518,7 +515,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun connectUsb(device: UsbDevice) {
-        viewModelScope.launch {
+        lifecycleJob?.cancel()
+        lifecycleJob = viewModelScope.launch {
             activateController(OmUsbCameraController(usbManager, device), demo = false)
         }
     }
@@ -541,13 +539,22 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             lastFrameDecodedAt = 0L
             lastFrameAnalyzedAt = 0L
             liveViewWatchdogJob?.cancel()
+            exposureSyncJob?.cancel()
+            exposureSyncJob = null
             frameCollectionJob?.cancel()
             frameCollectionJob = null
             analysisJob?.cancel()
             reviewJob?.cancel()
             controller?.let { old ->
-                runCatching { old.disconnect() }
-                old.forceClose()
+                // A stalled bulk transfer is a blocking Android USB call and cannot be
+                // interrupted reliably by coroutine cancellation alone. Close the old
+                // UsbDeviceConnection first so the read unblocks, then finish cleanup
+                // within a short bound before opening a fresh PTP session.
+                runCatching { old.forceClose() }
+                withTimeoutOrNull(CONTROLLER_SHUTDOWN_TIMEOUT_MS) {
+                    runCatching { old.disconnect() }
+                }
+                delay(USB_REOPEN_SETTLE_MS)
             }
             controller = newController
             mutableState.update {
@@ -566,6 +573,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     reviewHistogram = IntArray(256),
                     reviewHighlightPercent = 0f,
                     exposureControls = emptyList(),
+                    exposureSyncActive = false,
                     isCapturing = false,
                     showConnectionGuide = false,
                     liveViewIssue = null,
@@ -589,6 +597,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         phase = if (demo) ConnectionPhase.DEMO else ConnectionPhase.CONNECTED,
                         identity = session.identity,
                         exposureControls = session.exposureControls,
+                        exposureSyncActive = !demo,
                         statusMessage = if (demo) {
                             "デモモード — USB接続で実機へ切り替えられます"
                         } else {
@@ -599,7 +608,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 if (appInForeground) {
                     liveViewStartedAt = SystemClock.elapsedRealtime()
                     newController.startLiveView()
-                    if (!demo) startLiveViewWatchdog(newController, generation)
+                    if (!demo) {
+                        startLiveViewWatchdog(newController, generation)
+                        startExposureSync(newController, generation)
+                    }
                 }
             } catch (error: CancellationException) {
                 frameCollectionJob?.cancel()
@@ -625,6 +637,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         setupGrayCardSkipped = false,
                         setupStep = if (it.showSetupGuide && it.setupStep > 2) 2 else it.setupStep,
                         exposureControls = emptyList(),
+                        exposureSyncActive = false,
                         liveViewIssue = null,
                         statusMessage = "接続エラー: ${error.userMessage()}",
                     )
@@ -698,8 +711,59 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     SystemClock.elapsedRealtime() - newestActivity >= LIVE_VIEW_STALL_TIMEOUT_MS &&
                     mutableState.value.liveViewIssue == null
                 ) {
-                    val message = "ライブビューが停止しました。カメラ画面とUSBを確認して「再開」を押してください"
-                    mutableState.update { it.copy(liveViewIssue = message, statusMessage = message) }
+                    val message = "ライブビューが停止しました。「再接続」でUSB/PTPを初期化してください"
+                    mutableState.update {
+                        it.copy(
+                            liveBitmap = null,
+                            highlightOverlay = null,
+                            histogram = IntArray(256),
+                            highlightPercent = 0f,
+                            neutralPatch = null,
+                            exposureSyncActive = false,
+                            liveViewIssue = message,
+                            statusMessage = message,
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    private fun startExposureSync(requestedController: CameraController, generation: Long) {
+        exposureSyncJob?.cancel()
+        exposureSyncJob = viewModelScope.launch {
+            while (controller === requestedController && generation == frameGeneration) {
+                delay(EXPOSURE_SYNC_INTERVAL_MS)
+                if (
+                    !appInForeground ||
+                    mutableState.value.phase != ConnectionPhase.CONNECTED ||
+                    mutableState.value.isCapturing ||
+                    mutableState.value.liveViewIssue != null
+                ) {
+                    continue
+                }
+                try {
+                    val controls = cameraOperationMutex.withLock {
+                        if (controller !== requestedController || generation != frameGeneration) {
+                            null
+                        } else {
+                            requestedController.refreshExposureControls()
+                        }
+                    } ?: continue
+                    if (controller === requestedController && generation == frameGeneration) {
+                        mutableState.update {
+                            it.copy(
+                                exposureControls = controls,
+                                exposureSyncActive = true,
+                            )
+                        }
+                    }
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (_: Throwable) {
+                    if (controller === requestedController && generation == frameGeneration) {
+                        mutableState.update { it.copy(exposureSyncActive = false) }
+                    }
                 }
             }
         }
@@ -785,9 +849,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         liveViewStartedAt = SystemClock.elapsedRealtime()
                         lastLiveFrameReceivedAt = 0L
                         requestedController.startLiveView()
+                        if (requestedController !is MockCameraController) {
+                            startLiveViewWatchdog(requestedController, frameGeneration)
+                            startExposureSync(requestedController, frameGeneration)
+                        }
                         mutableState.update {
                             it.copy(
                                 liveViewIssue = null,
+                                exposureSyncActive = requestedController !is MockCameraController,
                                 statusMessage = if (requestedController is MockCameraController) {
                                     "デモモード — USB接続で実機へ切り替えられます"
                                 } else {
@@ -830,6 +899,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private fun handleUsbDetached() {
         frameGeneration++
         liveViewWatchdogJob?.cancel()
+        exposureSyncJob?.cancel()
+        exposureSyncJob = null
         captureJob?.cancel()
         captureJob = null
         lifecycleJob?.cancel()
@@ -856,6 +927,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 reviewHistogram = IntArray(256),
                 reviewHighlightPercent = 0f,
                 exposureControls = emptyList(),
+                exposureSyncActive = false,
                 isCapturing = false,
                 liveViewIssue = null,
                 statusMessage = "USBが切断されました。既に保存済みのファイルは保持されています",
@@ -874,6 +946,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         captureJob?.cancel()
         lifecycleJob?.cancel()
         liveViewWatchdogJob?.cancel()
+        exposureSyncJob?.cancel()
         controller?.forceClose()
         super.onCleared()
     }
@@ -907,6 +980,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         private const val LIVE_ANALYSIS_INTERVAL_MS = 500L
         private const val LIVE_VIEW_WATCHDOG_INTERVAL_MS = 1_000L
         private const val LIVE_VIEW_STALL_TIMEOUT_MS = 4_000L
+        private const val EXPOSURE_SYNC_INTERVAL_MS = 1_800L
+        private const val CONTROLLER_SHUTDOWN_TIMEOUT_MS = 1_500L
+        private const val USB_REOPEN_SETTLE_MS = 150L
         private const val LIVE_PREVIEW_MAX_DIMENSION = 1_024
         private const val CAPTURE_PREVIEW_MAX_DIMENSION = 2_048
         private const val PREFERENCES_NAME = "display_calibration"
