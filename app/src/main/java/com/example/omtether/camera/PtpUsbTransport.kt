@@ -53,16 +53,21 @@ class PtpUsbTransport(
             }
 
             var incomingData: ByteArray? = null
-            repeat(12) {
+            repeat(MAX_CONTAINERS_PER_TRANSACTION) {
                 val container = readContainer()
                 if (container.type == Ptp.CONTAINER_EVENT) {
                     log.add("! event ${Ptp.hex16(container.code)} params=${container.payload.size / 4}")
                     return@repeat
                 }
                 if (container.transactionId != transactionId) {
-                    throw PtpException(
-                        message = "PTP transaction mismatch: expected $transactionId, got ${container.transactionId}",
+                    // If an earlier live-view read was interrupted, its response can still be
+                    // waiting on bulk IN. Drain that stale container so the PTP stream can
+                    // recover instead of remaining one transaction behind forever.
+                    log.add(
+                        "! stale ${Ptp.hex16(container.code)} tx=${container.transactionId}; " +
+                            "waiting for tx=$transactionId",
                     )
+                    return@repeat
                 }
                 when (container.type) {
                     Ptp.CONTAINER_DATA -> {
@@ -154,21 +159,32 @@ class PtpUsbTransport(
 
     private fun readChunk(requestedBytes: Int): ByteArray {
         val buffer = ByteArray(requestedBytes)
-        val transferred = connection.bulkTransfer(
-            bulkIn,
-            buffer,
-            requestedBytes,
-            READ_TIMEOUT_MS,
-        )
-        if (transferred <= 0) {
-            throw PtpException(message = "USB bulk IN timed out (requested $requestedBytes B)")
+        repeat(MAX_ZERO_LENGTH_READS + 1) { attempt ->
+            val transferred = connection.bulkTransfer(
+                bulkIn,
+                buffer,
+                requestedBytes,
+                READ_TIMEOUT_MS,
+            )
+            if (transferred < 0) {
+                throw PtpException(message = "USB bulk IN timed out (requested $requestedBytes B)")
+            }
+            if (transferred == 0) {
+                // A PTP data phase whose byte count is an exact multiple of the endpoint
+                // packet size may be followed by a legal USB zero-length packet.
+                log.add("< USB zero-length packet ${attempt + 1}/$MAX_ZERO_LENGTH_READS")
+                return@repeat
+            }
+            return if (transferred == buffer.size) buffer else buffer.copyOf(transferred)
         }
-        return if (transferred == buffer.size) buffer else buffer.copyOf(transferred)
+        throw PtpException(message = "Too many USB zero-length packets while reading bulk IN")
     }
 
     companion object {
         private const val READ_CHUNK_BYTES = 64 * 1024
         private const val READ_TIMEOUT_MS = 20_000
         private const val WRITE_TIMEOUT_MS = 20_000
+        private const val MAX_CONTAINERS_PER_TRANSACTION = 24
+        private const val MAX_ZERO_LENGTH_READS = 4
     }
 }
