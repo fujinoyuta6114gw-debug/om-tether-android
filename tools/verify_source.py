@@ -24,9 +24,11 @@ def main() -> int:
         APP_SOURCE / "java" / "com" / "example" / "omtether" / "MainViewModel.kt",
         APP_SOURCE / "java" / "com" / "example" / "omtether" / "SetupGuidePolicy.kt",
         APP_SOURCE / "java" / "com" / "example" / "omtether" / "camera" / "OmUsbCameraController.kt",
+        APP_SOURCE / "java" / "com" / "example" / "omtether" / "storage" / "CapturePathPolicy.kt",
         APP_SOURCE / "java" / "com" / "example" / "omtether" / "ui" / "OmTetherApp.kt",
         ROOT / "app" / "src" / "test" / "java" / "com" / "example" / "omtether" / "SetupGuidePolicyTest.kt",
         ROOT / "app" / "src" / "test" / "java" / "com" / "example" / "omtether" / "camera" / "CaptureSavePolicyTest.kt",
+        ROOT / "app" / "src" / "test" / "java" / "com" / "example" / "omtether" / "storage" / "CapturePathPolicyTest.kt",
     ]
     for path in required_files:
         require(path.is_file(), f"missing required file: {path.relative_to(ROOT)}")
@@ -74,6 +76,12 @@ def main() -> int:
         "all-storage object scan": "listOf(0xFFFF_FFFFL, 0L, 0L)",
         "preview JPEG quality warning": "解像度・画質に制限があります",
         "persisted phone save choice": "KEY_PHONE_SAVE_FORMAT",
+        "full PTP reconnect": "USB/PTPセッションを作り直しています",
+        "bounded stale-controller shutdown": "CONTROLLER_SHUTDOWN_TIMEOUT_MS",
+        "camera exposure polling": "refreshExposureControls",
+        "periodic exposure synchronization": "EXPOSURE_SYNC_INTERVAL_MS",
+        "dedicated capture folder": "CapturePathPolicy.relativePath",
+        "neutral gray theme": "0xFFB8BEC7",
     }
     for label, marker in required_markers.items():
         require(marker in kotlin_source, f"missing implementation marker: {label}")
