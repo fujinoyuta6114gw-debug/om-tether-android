@@ -160,13 +160,15 @@ class OmUsbCameraController(
     }
 
     override suspend fun capture(
+        phoneSaveFormat: PhoneSaveFormat,
         onPreview: suspend (ByteArray) -> Unit,
         onObject: suspend (DownloadedObject) -> Unit,
     ): CaptureReport = cameraOperationMutex.withLock {
-        captureLocked(onPreview, onObject)
+        captureLocked(phoneSaveFormat, onPreview, onObject)
     }
 
     private suspend fun captureLocked(
+        phoneSaveFormat: PhoneSaveFormat,
         onPreview: suspend (ByteArray) -> Unit,
         onObject: suspend (DownloadedObject) -> Unit,
     ): CaptureReport {
@@ -180,6 +182,7 @@ class OmUsbCameraController(
             val warnings = mutableListOf<String>()
             val summaries = mutableListOf<CaptureObjectSummary>()
             var previewDelivered = false
+            var previewJpegFallbackUsed = false
 
             suspend fun deliverPreview(bytes: ByteArray) {
                 try {
@@ -243,51 +246,132 @@ class OmUsbCameraController(
                 }
             }
 
-            for (candidate in candidates.sortedByDescending { isJpeg(it.info) }) {
-                if (!previewDelivered && candidate.info.thumbSize > 0L) {
-                    readObjectThumbnail(candidate)?.let { deliverPreview(it) }
-                }
-                val item = try {
-                    downloadObject(candidate)
-                } catch (error: CancellationException) {
-                    throw error
-                } catch (error: Throwable) {
-                    val message = "${candidate.displayName} download failed: ${error.message}"
-                    warnings += message
-                    log.add(message)
-                    continue
-                }
+            log.add(
+                "Phone save=${phoneSaveFormat.name}; candidates=" +
+                    candidates.joinToString { candidate ->
+                        "${candidate.displayName}@${Ptp.hex32(candidate.info.storageId)}"
+                    }.ifBlank { "none" },
+            )
 
-                if (isJpeg(candidate.info)) {
-                    extractJpeg(item.bytes)?.let { deliverPreview(it) }
-                } else if (!previewDelivered) {
-                    item.previewJpeg?.let { deliverPreview(it) }
-                }
-                deliverObject(item)
+            fun orderedCandidates(format: PhoneSaveFormat): List<ObjectCandidate> {
+                return CaptureSavePolicy
+                    .orderedPreferred(format, candidates.map(ObjectCandidate::info))
+                    .mapNotNull { chosen ->
+                        candidates.firstOrNull { candidate -> candidate.info === chosen }
+                    }
             }
 
-            if ((!previewDelivered || summaries.isEmpty()) && Ptp.OMD_GET_IMAGE in info.operations) {
-                getCapturedJpegFallback()?.let { fallback ->
-                    if (!previewDelivered) deliverPreview(fallback.bytes)
-                    if (summaries.none { it.filename.equals(fallback.filename, ignoreCase = true) }) {
-                        deliverObject(fallback)
+            when (phoneSaveFormat) {
+                PhoneSaveFormat.JPEG -> {
+                    val fullJpegCandidates = orderedCandidates(PhoneSaveFormat.JPEG)
+                    var jpegThumbnailFallback: DownloadedObject? = null
+                    for (candidate in fullJpegCandidates) {
+                        if (!previewDelivered && candidate.info.thumbSize > 0L) {
+                            readObjectThumbnail(candidate)?.let { thumbnail ->
+                                deliverPreview(thumbnail)
+                                jpegThumbnailFallback = DownloadedObject(
+                                    handle = candidate.handle,
+                                    filename = previewFilename(candidate.info.filename),
+                                    format = CaptureSavePolicy.JPEG_OBJECT_FORMAT,
+                                    bytes = thumbnail,
+                                )
+                            }
+                        }
+                        val item = downloadSelectedObject(candidate, warnings)
+                        if (item != null) {
+                            extractJpeg(item.bytes)?.let { deliverPreview(it) }
+                            deliverObject(item)
+                            break
+                        }
+                    }
+                    if (summaries.isEmpty()) {
+                        var fallback = jpegThumbnailFallback
+                        if (fallback == null) {
+                            for (rawCandidate in orderedCandidates(PhoneSaveFormat.RAW)) {
+                                val preview = readObjectThumbnail(rawCandidate)
+                                if (preview != null) {
+                                    fallback = DownloadedObject(
+                                        handle = rawCandidate.handle,
+                                        filename = previewFilename(rawCandidate.info.filename),
+                                        format = CaptureSavePolicy.JPEG_OBJECT_FORMAT,
+                                        bytes = preview,
+                                    )
+                                    break
+                                }
+                            }
+                        }
+                        if (fallback == null && Ptp.OMD_GET_IMAGE in info.operations) {
+                            fallback = getCapturedJpegFallback()
+                        }
+                        if (fallback != null) {
+                            previewJpegFallbackUsed = true
+                            val message =
+                                "フルJPEGを保存できなかったため、プレビューJPEGを保存しました（解像度・画質に制限があります）"
+                            warnings += message
+                            log.add(message)
+                            deliverPreview(fallback.bytes)
+                            deliverObject(fallback)
+                        }
+                    }
+                }
+
+                PhoneSaveFormat.RAW -> {
+                    val rawCandidates = orderedCandidates(PhoneSaveFormat.RAW)
+                    rawCandidates.firstOrNull { it.info.thumbSize > 0L }
+                        ?.let { readObjectThumbnail(it) }
+                        ?.let { deliverPreview(it) }
+                    if (rawCandidates.isNotEmpty()) {
+                        if (!previewDelivered && Ptp.OMD_GET_IMAGE in info.operations) {
+                            getCapturedJpegFallback()?.let { deliverPreview(it.bytes) }
+                        }
+                        for (candidate in rawCandidates) {
+                            val item = downloadSelectedObject(candidate, warnings)
+                            if (item != null) {
+                                deliverObject(item)
+                                break
+                            }
+                        }
                     }
                 }
             }
+
             if (summaries.isEmpty()) {
                 throw PtpException(
-                    message = "The shutter fired, but no new JPEG/ORF object became readable. Copy diagnostics before retrying.",
+                    message = when (phoneSaveFormat) {
+                        PhoneSaveFormat.JPEG ->
+                            "シャッター後にJPEGもRAWプレビューも取得できませんでした。カメラのカード保存設定と診断ログを確認してください。"
+                        PhoneSaveFormat.RAW ->
+                            "シャッター後にORFが見つかりませんでした。カメラ側でRAW記録が有効か確認してください。"
+                    },
                 )
             }
 
             log.add("Capture complete: ${summaries.joinToString { "${it.filename} (${it.byteCount} B)" }}")
-            return CaptureReport(summaries, warnings.distinct())
+            return CaptureReport(
+                objects = summaries,
+                warnings = warnings.distinct(),
+                previewJpegFallbackUsed = previewJpegFallbackUsed,
+            )
         } finally {
             if (resumeLiveView && connection != null && coroutineContext.isActive) {
                 runCatching { startLiveView() }
                     .onFailure { log.add("Could not resume live view: ${it.message}") }
             }
         }
+    }
+
+    private suspend fun downloadSelectedObject(
+        candidate: ObjectCandidate,
+        warnings: MutableList<String>,
+    ): DownloadedObject? = try {
+        downloadObject(candidate)
+    } catch (error: CancellationException) {
+        throw error
+    } catch (error: Throwable) {
+        val message = "${candidate.displayName} download failed: ${error.message}"
+        warnings += message
+        log.add(message)
+        null
     }
 
     override suspend fun setExposure(propertyCode: Int, value: PtpScalar): List<ExposureControl> =
@@ -334,7 +418,7 @@ class OmUsbCameraController(
     }
 
     override fun diagnosticsText(): String = buildString {
-        appendLine("OM Tether 0.2.2")
+        appendLine("OM Tether 0.3.0")
         appendLine("USB: VID=${Ptp.hex16(device.vendorId)} PID=${Ptp.hex16(device.productId)} name=${device.deviceName}")
         deviceInfo?.let { info ->
             appendLine("Camera: ${info.manufacturer} ${info.model}")
@@ -642,7 +726,8 @@ class OmUsbCameraController(
         }
         log.add(
             "ObjectInfo handle=${Ptp.hex32(handle)} name=${objectInfo.filename} " +
-                "format=${Ptp.hex16(objectInfo.format)} size=${objectInfo.compressedSize}",
+                "storage=${Ptp.hex32(objectInfo.storageId)} format=${Ptp.hex16(objectInfo.format)} " +
+                "size=${objectInfo.compressedSize}",
         )
         return ObjectCandidate(handle, objectInfo)
     }
@@ -705,7 +790,7 @@ class OmUsbCameraController(
                 message = "${candidate.displayName} size mismatch: expected $expected B, received ${bytes.size} B",
             )
         }
-        if (isJpeg(candidate.info) && !hasJpegMagic(bytes)) {
+        if (CaptureSavePolicy.isJpeg(candidate.info) && !hasJpegMagic(bytes)) {
             throw PtpException(message = "${candidate.displayName} did not contain a valid JPEG header")
         }
     }
@@ -718,7 +803,7 @@ class OmUsbCameraController(
                 if (bytes != null) {
                     val filename = "OM_CAPTURE_${timestamp()}.JPG"
                     log.add("Using OMD GetImage fallback: ${bytes.size} B")
-                    return DownloadedObject(null, filename, 0x3801, bytes)
+                    return DownloadedObject(null, filename, CaptureSavePolicy.JPEG_OBJECT_FORMAT, bytes)
                 }
             } catch (error: PtpException) {
                 if (error.responseCode != Ptp.RESPONSE_DEVICE_BUSY) {
@@ -806,11 +891,6 @@ class OmUsbCameraController(
         }
     }
 
-    private fun isJpeg(info: PtpObjectInfo): Boolean =
-        info.format == 0x3801 ||
-            info.filename.endsWith(".jpg", true) ||
-            info.filename.endsWith(".jpeg", true)
-
     private fun hasJpegMagic(bytes: ByteArray): Boolean {
         if (
             bytes.size < 4 ||
@@ -825,8 +905,14 @@ class OmUsbCameraController(
         return false
     }
 
+    private fun previewFilename(rawFilename: String): String {
+        val filename = rawFilename.ifBlank { "OM_CAPTURE_${timestamp()}.ORF" }
+        val stem = filename.substringBeforeLast('.', filename)
+        return "${stem}_PREVIEW.JPG"
+    }
+
     private fun fallbackFilename(format: Int): String {
-        val extension = if (format == 0x3801) "JPG" else "ORF"
+        val extension = if (format == CaptureSavePolicy.JPEG_OBJECT_FORMAT) "JPG" else "ORF"
         return "OM_CAPTURE_${timestamp()}.$extension"
     }
 
@@ -849,10 +935,10 @@ class OmUsbCameraController(
 
     companion object {
         private const val CAPTURE_TIMEOUT_MS = 12_000L
-        private const val COMPANION_OBJECT_WAIT_MS = 1_500L
+        private const val COMPANION_OBJECT_WAIT_MS = 2_500L
         private const val STORAGE_POLL_INTERVAL_MS = 700L
         private const val FALLBACK_IMAGE_TIMEOUT_MS = 5_000L
-        private const val MAX_OBJECTS_PER_CAPTURE = 4
+        private const val MAX_OBJECTS_PER_CAPTURE = 8
         private const val OBJECT_READ_ATTEMPTS = 6
         private const val OBJECT_RETRY_BASE_DELAY_MS = 150L
         private const val CAPTURE_COMMAND_ATTEMPTS = 4
