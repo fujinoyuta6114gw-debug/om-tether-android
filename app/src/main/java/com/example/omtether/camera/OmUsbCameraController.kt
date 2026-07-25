@@ -220,12 +220,12 @@ class OmUsbCameraController(
                 null
             }
 
-            val activeTransport = requiredTransport()
-            activeTransport.execute(Ptp.OMD_CAPTURE, parameters = listOf(3L))
-            activeTransport.execute(Ptp.OMD_CAPTURE, parameters = listOf(6L))
+            logCaptureTarget()
+            executeCaptureCommand(parameter = 3L)
+            executeCaptureCommand(parameter = 6L)
             delay(80)
             if (Ptp.OMD_CHANGED_PROPERTIES in info.operations) {
-                runCatching { activeTransport.execute(Ptp.OMD_CHANGED_PROPERTIES) }
+                runCatching { requiredTransport().execute(Ptp.OMD_CHANGED_PROPERTIES) }
                     .onFailure { log.add("ChangedProperties read failed: ${it.message}") }
             }
 
@@ -334,7 +334,7 @@ class OmUsbCameraController(
     }
 
     override fun diagnosticsText(): String = buildString {
-        appendLine("OM Tether 0.2.1")
+        appendLine("OM Tether 0.2.2")
         appendLine("USB: VID=${Ptp.hex16(device.vendorId)} PID=${Ptp.hex16(device.productId)} name=${device.deviceName}")
         deviceInfo?.let { info ->
             appendLine("Camera: ${info.manufacturer} ${info.model}")
@@ -345,6 +345,48 @@ class OmUsbCameraController(
         }
         appendLine()
         append(log.text())
+    }
+
+    private suspend fun logCaptureTarget() {
+        runCatching {
+            val bytes = requiredTransport().execute(
+                Ptp.GET_DEVICE_PROP_VALUE,
+                parameters = listOf(Ptp.PROP_CAPTURE_TARGET.toLong()),
+            ).data ?: return
+            if (bytes.size >= 2) {
+                val target = PtpCursor(bytes).scalar(Ptp.TYPE_UINT16).raw
+                log.add("Capture target ${Ptp.hex16(Ptp.PROP_CAPTURE_TARGET)}=${Ptp.hex32(target)}")
+            }
+        }.onFailure {
+            // Some firmware does not advertise/read this optional property. Capture is
+            // still valid, so retain the diagnostic and continue.
+            log.add("Capture target read unavailable: ${it.message}")
+        }
+    }
+
+    private suspend fun executeCaptureCommand(parameter: Long) {
+        var lastBusy: PtpException? = null
+        repeat(CAPTURE_COMMAND_ATTEMPTS) { attempt ->
+            try {
+                requiredTransport().execute(Ptp.OMD_CAPTURE, parameters = listOf(parameter))
+                return
+            } catch (error: PtpException) {
+                if (
+                    error.responseCode != Ptp.RESPONSE_DEVICE_BUSY ||
+                    attempt == CAPTURE_COMMAND_ATTEMPTS - 1
+                ) {
+                    throw error
+                }
+                lastBusy = error
+                val waitMs = CAPTURE_COMMAND_RETRY_DELAY_MS * (attempt + 1)
+                log.add(
+                    "Capture parameter $parameter busy; " +
+                        "retry ${attempt + 2}/$CAPTURE_COMMAND_ATTEMPTS in ${waitMs}ms",
+                )
+                delay(waitMs)
+            }
+        }
+        throw lastBusy ?: PtpException(message = "Capture command failed")
     }
 
     private suspend fun initializePcMode(info: PtpDeviceInfo) {
@@ -364,10 +406,9 @@ class OmUsbCameraController(
         // OM-D initialization uses UINT16 value 1 even on bodies that omit D052 from DeviceInfo.
         // Identity has already been checked against both the OM-1 Mark II USB ID and PTP strings.
         runCatching {
-            requiredTransport().execute(
-                code = Ptp.SET_DEVICE_PROP_VALUE,
-                parameters = listOf(Ptp.PROP_PC_MODE.toLong()),
-                outgoingData = PtpScalar(Ptp.TYPE_UINT16, 1L).encode(),
+            setKnownPropertyWhenReady(
+                propertyCode = Ptp.PROP_PC_MODE,
+                value = PtpScalar(Ptp.TYPE_UINT16, 1L),
             )
         }.onSuccess {
             log.add("PC mode enabled through ${Ptp.hex16(Ptp.PROP_PC_MODE)}")
@@ -392,10 +433,9 @@ class OmUsbCameraController(
             return
         }
         runCatching {
-            requiredTransport().execute(
-                code = Ptp.SET_DEVICE_PROP_VALUE,
-                parameters = listOf(Ptp.PROP_LIVE_VIEW_MODE.toLong()),
-                outgoingData = PtpScalar(Ptp.TYPE_UINT32, Ptp.LIVE_VIEW_ENABLED_VALUE).encode(),
+            setKnownPropertyWhenReady(
+                propertyCode = Ptp.PROP_LIVE_VIEW_MODE,
+                value = PtpScalar(Ptp.TYPE_UINT32, Ptp.LIVE_VIEW_ENABLED_VALUE),
             )
         }.onSuccess {
             log.add("Live-view property set to ${Ptp.hex32(Ptp.LIVE_VIEW_ENABLED_VALUE)}")
@@ -403,6 +443,35 @@ class OmUsbCameraController(
         }.onFailure {
             log.add("Live-view initialization was not accepted: ${it.message}")
         }
+    }
+
+    private suspend fun setKnownPropertyWhenReady(propertyCode: Int, value: PtpScalar) {
+        var lastBusy: PtpException? = null
+        repeat(PROPERTY_WRITE_ATTEMPTS) { attempt ->
+            try {
+                requiredTransport().execute(
+                    code = Ptp.SET_DEVICE_PROP_VALUE,
+                    parameters = listOf(propertyCode.toLong()),
+                    outgoingData = value.encode(),
+                )
+                return
+            } catch (error: PtpException) {
+                if (
+                    error.responseCode != Ptp.RESPONSE_DEVICE_BUSY ||
+                    attempt == PROPERTY_WRITE_ATTEMPTS - 1
+                ) {
+                    throw error
+                }
+                lastBusy = error
+                val waitMs = PROPERTY_WRITE_RETRY_DELAY_MS * (attempt + 1)
+                log.add(
+                    "Property ${Ptp.hex16(propertyCode)} busy; " +
+                        "retry ${attempt + 2}/$PROPERTY_WRITE_ATTEMPTS in ${waitMs}ms",
+                )
+                delay(waitMs)
+            }
+        }
+        throw lastBusy ?: PtpException(message = "Property write failed")
     }
 
     private suspend fun readExposureControls(): List<ExposureControl> {
@@ -786,6 +855,10 @@ class OmUsbCameraController(
         private const val MAX_OBJECTS_PER_CAPTURE = 4
         private const val OBJECT_READ_ATTEMPTS = 6
         private const val OBJECT_RETRY_BASE_DELAY_MS = 150L
+        private const val CAPTURE_COMMAND_ATTEMPTS = 4
+        private const val CAPTURE_COMMAND_RETRY_DELAY_MS = 120L
+        private const val PROPERTY_WRITE_ATTEMPTS = 4
+        private const val PROPERTY_WRITE_RETRY_DELAY_MS = 120L
         private val OBJECT_ADDED_EVENT_CODES = setOf(
             Ptp.EVENT_OBJECT_ADDED,
             Ptp.EVENT_OLYMPUS_OBJECT_ADDED,
