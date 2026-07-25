@@ -374,6 +374,30 @@ class OmUsbCameraController(
         null
     }
 
+    override suspend fun refreshExposureControls(): List<ExposureControl> =
+        cameraOperationMutex.withLock {
+            ExposureFormatter.definitions.mapNotNull { definition ->
+                val code = definition.candidates.firstOrNull(descriptors::containsKey)
+                    ?: return@mapNotNull null
+                val previous = descriptors.getValue(code)
+                val current = runCatching { getPropertyValue(code, previous.dataType) }
+                    .onFailure {
+                        log.add("Property ${Ptp.hex16(code)} value refresh failed: ${it.message}")
+                    }
+                    .getOrNull()
+                    ?: previous.current
+                if (current.raw != previous.current.raw) {
+                    log.add(
+                        "Property ${Ptp.hex16(code)} changed " +
+                            "${Ptp.hex32(previous.current.raw)} -> ${Ptp.hex32(current.raw)}",
+                    )
+                }
+                val refreshed = previous.copy(current = current)
+                descriptors[code] = refreshed
+                ExposureFormatter.toControl(definition.title, refreshed)
+            }
+        }
+
     override suspend fun setExposure(propertyCode: Int, value: PtpScalar): List<ExposureControl> =
         cameraOperationMutex.withLock {
             val descriptor = descriptors[propertyCode]
@@ -418,7 +442,7 @@ class OmUsbCameraController(
     }
 
     override fun diagnosticsText(): String = buildString {
-        appendLine("OM Tether 0.3.0")
+        appendLine("OM Tether 0.3.1")
         appendLine("USB: VID=${Ptp.hex16(device.vendorId)} PID=${Ptp.hex16(device.productId)} name=${device.deviceName}")
         deviceInfo?.let { info ->
             appendLine("Camera: ${info.manufacturer} ${info.model}")
@@ -562,15 +586,28 @@ class OmUsbCameraController(
         val supported = deviceInfo?.properties.orEmpty()
         descriptors.clear()
         return ExposureFormatter.definitions.mapNotNull { definition ->
-            definition.candidates.firstNotNullOfOrNull { code ->
-                if (code !in supported) return@firstNotNullOfOrNull null
-                val descriptor = runCatching { getDescriptor(code) }
-                    .onFailure { log.add("Property ${Ptp.hex16(code)} descriptor failed: ${it.message}") }
-                    .getOrNull() ?: return@firstNotNullOfOrNull null
-                descriptors[code] = descriptor
-                ExposureFormatter.toControl(definition.title, descriptor)
-            }
+            definition.candidates
+                .sortedByDescending(supported::contains)
+                .firstNotNullOfOrNull { code ->
+                    val descriptor = runCatching { getDescriptor(code) }
+                        .onFailure {
+                            if (code in supported) {
+                                log.add("Property ${Ptp.hex16(code)} descriptor failed: ${it.message}")
+                            }
+                        }
+                        .getOrNull() ?: return@firstNotNullOfOrNull null
+                    descriptors[code] = descriptor
+                    ExposureFormatter.toControl(definition.title, descriptor)
+                }
         }
+    }
+
+    private suspend fun getPropertyValue(code: Int, dataType: Int): PtpScalar {
+        val bytes = requiredTransport().execute(
+            Ptp.GET_DEVICE_PROP_VALUE,
+            parameters = listOf(code.toLong()),
+        ).data ?: throw PtpException(message = "Property value ${Ptp.hex16(code)} has no data")
+        return PtpCursor(bytes).scalar(dataType)
     }
 
     private suspend fun getDescriptor(code: Int): PtpPropertyDescriptor {
