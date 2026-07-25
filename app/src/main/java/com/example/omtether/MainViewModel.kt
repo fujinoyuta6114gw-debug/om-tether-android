@@ -28,6 +28,7 @@ import com.example.omtether.storage.SavedObject
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -76,12 +77,14 @@ data class MainUiState(
     val exposureControls: List<ExposureControl> = emptyList(),
     val isCapturing: Boolean = false,
     val lastCapture: LastCapture? = null,
+    val showConnectionGuide: Boolean = true,
     val showSetupGuide: Boolean = false,
     val setupStep: Int = 0,
     val displayCalibration: DisplayCalibration = DisplayCalibration(),
     val neutralPatch: NeutralPatchResult? = null,
     val setupWbConfirmed: Boolean = false,
     val setupGrayCardSkipped: Boolean = false,
+    val liveViewIssue: String? = null,
     val statusMessage: String = "USB-CでOM‑1 Mark IIを接続してください",
 )
 
@@ -105,7 +108,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var reviewJob: Job? = null
     private var captureJob: Job? = null
     private var lifecycleJob: Job? = null
+    private var liveViewWatchdogJob: Job? = null
     private var frameGeneration = 0L
+    private var liveViewStartedAt = 0L
+    private var lastLiveFrameReceivedAt = 0L
+    private var lastFrameDecodedAt = 0L
     private var lastFrameAnalyzedAt = 0L
     private var appInForeground = true
 
@@ -127,7 +134,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     }
                 }
                 UsbManager.ACTION_USB_DEVICE_ATTACHED -> {
-                    intent.usbDevice()?.takeIf(::isOm1MarkII)?.let(::requestUsbPermissionOrConnect)
+                    intent.usbDevice()?.takeIf(::isOm1MarkII)?.let(::handleUsbAttached)
                 }
                 UsbManager.ACTION_USB_DEVICE_DETACHED -> {
                     val detached = intent.usbDevice() ?: return
@@ -149,30 +156,45 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             filter,
             ContextCompat.RECEIVER_EXPORTED,
         )
-        startDemo()
     }
 
     fun handleIntent(intent: Intent?) {
         if (intent?.action == UsbManager.ACTION_USB_DEVICE_ATTACHED) {
-            intent.usbDevice()?.takeIf(::isOm1MarkII)?.let(::requestUsbPermissionOrConnect)
+            intent.usbDevice()?.takeIf(::isOm1MarkII)?.let(::handleUsbAttached)
         }
     }
 
-    fun requestUsbConnection() {
+    fun openUsbConnectionGuide() {
+        mutableState.update {
+            it.copy(
+                showConnectionGuide = true,
+                statusMessage = "カメラ側で「0 RAW/Control」を選んでから接続してください",
+            )
+        }
+    }
+
+    fun dismissUsbConnectionGuide() {
+        mutableState.update { it.copy(showConnectionGuide = false) }
+    }
+
+    fun confirmUsbSetupAndConnect() {
         val device = usbManager.deviceList.values.firstOrNull(::isOm1MarkII)
         if (device == null) {
             mutableState.update {
                 it.copy(
                     phase = if (controller is MockCameraController) ConnectionPhase.DEMO else ConnectionPhase.DISCONNECTED,
-                    statusMessage = "OM‑1 Mark IIが見つかりません。RAW/Controlとデータケーブルを確認してください",
+                    showConnectionGuide = true,
+                    statusMessage = "カメラが見つかりません。電源・0 RAW/Control・データケーブルを確認してください",
                 )
             }
             return
         }
+        mutableState.update { it.copy(showConnectionGuide = false) }
         requestUsbPermissionOrConnect(device)
     }
 
     fun startDemo() {
+        mutableState.update { it.copy(showConnectionGuide = false) }
         viewModelScope.launch {
             activateController(MockCameraController(), demo = true)
         }
@@ -254,6 +276,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     }
                 } finally {
                     if (controller === requestedController) {
+                        if (requestedController !is MockCameraController && appInForeground) {
+                            liveViewStartedAt = SystemClock.elapsedRealtime()
+                        }
                         mutableState.update { it.copy(isCapturing = false) }
                         scheduleReviewClear()
                     }
@@ -411,7 +436,37 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun diagnosticsText(): String = controller?.diagnosticsText()
-        ?: "OM Tether 0.2.1\nCamera controller is not active."
+        ?: "OM Tether 0.2.2\nCamera controller is not active."
+
+    fun restartLiveView() {
+        val requestedController = controller ?: return
+        if (requestedController is MockCameraController) return
+        lifecycleJob?.cancel()
+        lifecycleJob = viewModelScope.launch {
+            cameraOperationMutex.withLock {
+                if (controller !== requestedController) return@withLock
+                mutableState.update {
+                    it.copy(
+                        liveViewIssue = null,
+                        statusMessage = "ライブビューを再開しています…",
+                    )
+                }
+                try {
+                    requestedController.stopLiveView()
+                    liveViewStartedAt = SystemClock.elapsedRealtime()
+                    lastLiveFrameReceivedAt = 0L
+                    requestedController.startLiveView()
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (error: Throwable) {
+                    if (controller === requestedController) {
+                        val message = "ライブビュー再開エラー: ${error.userMessage()}"
+                        mutableState.update { it.copy(liveViewIssue = message, statusMessage = message) }
+                    }
+                }
+            }
+        }
+    }
 
     private fun requestUsbPermissionOrConnect(device: UsbDevice) {
         if (usbManager.hasPermission(device)) {
@@ -439,10 +494,24 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    private fun handleUsbAttached(device: UsbDevice) {
+        if (!isOm1MarkII(device)) return
+        mutableState.update {
+            it.copy(
+                showConnectionGuide = true,
+                statusMessage = "USBを検出しました。カメラ側で「0 RAW/Control」を選択してください",
+            )
+        }
+    }
+
     private suspend fun activateController(newController: CameraController, demo: Boolean) {
         cameraOperationMutex.withLock {
             frameGeneration++
+            liveViewStartedAt = 0L
+            lastLiveFrameReceivedAt = 0L
+            lastFrameDecodedAt = 0L
             lastFrameAnalyzedAt = 0L
+            liveViewWatchdogJob?.cancel()
             frameCollectionJob?.cancel()
             frameCollectionJob = null
             analysisJob?.cancel()
@@ -469,6 +538,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     reviewHighlightPercent = 0f,
                     exposureControls = emptyList(),
                     isCapturing = false,
+                    showConnectionGuide = false,
+                    liveViewIssue = null,
                     statusMessage = if (demo) "デモモード — カメラへ命令は送信しません" else "OM‑1 Mark IIへ接続しています…",
                 )
             }
@@ -476,9 +547,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 val session = newController.connect()
                 val generation = frameGeneration
                 frameCollectionJob = viewModelScope.launch {
-                    // Analyze one frame to completion and retain only the newest waiting frame.
-                    // collectLatest could repeatedly cancel JPEG analysis on a slower Android device.
-                    newController.frames.conflate().collect { jpeg -> updateFrame(jpeg, generation) }
+                    // Decode one frame to completion and retain only the newest waiting frame.
+                    // Analysis runs less often than display updates to avoid GC stalls.
+                    newController.frames.conflate().collect { jpeg ->
+                        val announceFirstFrame = lastLiveFrameReceivedAt == 0L
+                        lastLiveFrameReceivedAt = SystemClock.elapsedRealtime()
+                        updateFrame(jpeg, generation, announceFirstFrame)
+                    }
                 }
                 mutableState.update {
                     it.copy(
@@ -488,11 +563,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         statusMessage = if (demo) {
                             "デモモード — USB接続で実機へ切り替えられます"
                         } else {
-                            "USB接続完了 — RAW+JPEGで撮影できます"
+                            "ライブビューを開始しています…"
                         },
                     )
                 }
-                if (appInForeground) newController.startLiveView()
+                if (appInForeground) {
+                    liveViewStartedAt = SystemClock.elapsedRealtime()
+                    newController.startLiveView()
+                    if (!demo) startLiveViewWatchdog(newController, generation)
+                }
             } catch (error: CancellationException) {
                 frameCollectionJob?.cancel()
                 frameCollectionJob = null
@@ -517,6 +596,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         setupGrayCardSkipped = false,
                         setupStep = if (it.showSetupGuide && it.setupStep > 2) 2 else it.setupStep,
                         exposureControls = emptyList(),
+                        liveViewIssue = null,
                         statusMessage = "接続エラー: ${error.userMessage()}",
                     )
                 }
@@ -524,16 +604,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    private suspend fun updateFrame(jpeg: ByteArray, generation: Long) {
+    private suspend fun updateFrame(jpeg: ByteArray, generation: Long, announceFirstFrame: Boolean) {
         val now = SystemClock.elapsedRealtime()
-        if (now - lastFrameAnalyzedAt < LIVE_FRAME_INTERVAL_MS) return
-        lastFrameAnalyzedAt = now
+        if (now - lastFrameDecodedAt < LIVE_FRAME_INTERVAL_MS) return
+        lastFrameDecodedAt = now
         val snapshot = mutableState.value
         val threshold = snapshot.highlightThreshold
         val includeHighlight = snapshot.highlightEnabled
+        val shouldAnalyze = now - lastFrameAnalyzedAt >= LIVE_ANALYSIS_INTERVAL_MS
+        if (shouldAnalyze) lastFrameAnalyzedAt = now
         val decodedAndAnalyzed = withContext(Dispatchers.Default) {
             val bitmap = ImageAnalysis.decodeJpeg(jpeg, LIVE_PREVIEW_MAX_DIMENSION) ?: return@withContext null
-            bitmap to ImageAnalysis.analyze(bitmap, threshold, includeHighlight)
+            bitmap to if (shouldAnalyze) ImageAnalysis.analyze(bitmap, threshold, includeHighlight) else null
         } ?: return
         if (generation != frameGeneration) return
         mutableState.update { current ->
@@ -544,13 +626,49 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             ) {
                 current
             } else {
+                val analysis = decodedAndAnalyzed.second
                 current.copy(
                     liveBitmap = decodedAndAnalyzed.first,
-                    histogram = decodedAndAnalyzed.second.histogram,
-                    highlightOverlay = decodedAndAnalyzed.second.highlightOverlay,
-                    highlightPercent = decodedAndAnalyzed.second.highlightPercent,
-                    neutralPatch = decodedAndAnalyzed.second.neutralPatch,
+                    histogram = analysis?.histogram ?: current.histogram,
+                    highlightOverlay = analysis?.highlightOverlay ?: current.highlightOverlay,
+                    highlightPercent = analysis?.highlightPercent ?: current.highlightPercent,
+                    neutralPatch = analysis?.neutralPatch ?: current.neutralPatch,
+                    liveViewIssue = null,
+                    statusMessage = if (
+                        announceFirstFrame ||
+                        current.liveBitmap == null ||
+                        current.liveViewIssue != null
+                    ) {
+                        "ライブビュー受信中 — RAW+JPEGで撮影できます"
+                    } else {
+                        current.statusMessage
+                    },
                 )
+            }
+        }
+    }
+
+    private fun startLiveViewWatchdog(requestedController: CameraController, generation: Long) {
+        liveViewWatchdogJob?.cancel()
+        liveViewWatchdogJob = viewModelScope.launch {
+            while (controller === requestedController && generation == frameGeneration) {
+                delay(LIVE_VIEW_WATCHDOG_INTERVAL_MS)
+                if (
+                    !appInForeground ||
+                    mutableState.value.phase != ConnectionPhase.CONNECTED ||
+                    mutableState.value.isCapturing
+                ) {
+                    continue
+                }
+                val newestActivity = maxOf(liveViewStartedAt, lastLiveFrameReceivedAt)
+                if (
+                    newestActivity > 0L &&
+                    SystemClock.elapsedRealtime() - newestActivity >= LIVE_VIEW_STALL_TIMEOUT_MS &&
+                    mutableState.value.liveViewIssue == null
+                ) {
+                    val message = "ライブビューが停止しました。カメラ画面とUSBを確認して「再開」を押してください"
+                    mutableState.update { it.copy(liveViewIssue = message, statusMessage = message) }
+                }
             }
         }
     }
@@ -632,13 +750,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 if (controller !== requestedController) return@withLock
                 try {
                     if (foreground) {
+                        liveViewStartedAt = SystemClock.elapsedRealtime()
+                        lastLiveFrameReceivedAt = 0L
                         requestedController.startLiveView()
                         mutableState.update {
-                            it.copy(statusMessage = if (requestedController is MockCameraController) {
-                                "デモモード — USB接続で実機へ切り替えられます"
-                            } else {
-                                "ライブビューを再開しました"
-                            })
+                            it.copy(
+                                liveViewIssue = null,
+                                statusMessage = if (requestedController is MockCameraController) {
+                                    "デモモード — USB接続で実機へ切り替えられます"
+                                } else {
+                                    "ライブビューを再開しています…"
+                                },
+                            )
                         }
                     } else {
                         requestedController.stopLiveView()
@@ -674,6 +797,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun handleUsbDetached() {
         frameGeneration++
+        liveViewWatchdogJob?.cancel()
         captureJob?.cancel()
         captureJob = null
         lifecycleJob?.cancel()
@@ -701,6 +825,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 reviewHighlightPercent = 0f,
                 exposureControls = emptyList(),
                 isCapturing = false,
+                liveViewIssue = null,
                 statusMessage = "USBが切断されました。既に保存済みのファイルは保持されています",
             )
         }
@@ -716,6 +841,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         reviewJob?.cancel()
         captureJob?.cancel()
         lifecycleJob?.cancel()
+        liveViewWatchdogJob?.cancel()
         controller?.forceClose()
         super.onCleared()
     }
@@ -738,8 +864,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     companion object {
         private const val ACTION_USB_PERMISSION = "com.example.omtether.USB_PERMISSION"
         private const val CAPTURE_REVIEW_MS = 2_500L
-        private const val LIVE_FRAME_INTERVAL_MS = 100L
-        private const val LIVE_PREVIEW_MAX_DIMENSION = 1_280
+        private const val LIVE_FRAME_INTERVAL_MS = 125L
+        private const val LIVE_ANALYSIS_INTERVAL_MS = 500L
+        private const val LIVE_VIEW_WATCHDOG_INTERVAL_MS = 1_000L
+        private const val LIVE_VIEW_STALL_TIMEOUT_MS = 4_000L
+        private const val LIVE_PREVIEW_MAX_DIMENSION = 1_024
         private const val CAPTURE_PREVIEW_MAX_DIMENSION = 2_048
         private const val PREFERENCES_NAME = "display_calibration"
         private const val KEY_SETUP_COMPLETE = "setup_complete"
