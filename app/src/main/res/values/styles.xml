@@ -3,9 +3,9 @@
     <style name="Theme.OMTether" parent="android:style/Theme.Material.NoActionBar">
         <item name="android:fontFamily">sans</item>
         <item name="android:windowActionModeOverlay">true</item>
-        <item name="android:colorAccent">#FFB000</item>
-        <item name="android:statusBarColor">#090B0E</item>
-        <item name="android:navigationBarColor">#090B0E</item>
+        <item name="android:colorAccent">#B8BEC7</item>
+        <item name="android:statusBarColor">#101214</item>
+        <item name="android:navigationBarColor">#101214</item>
         <item name="android:windowLightStatusBar">false</item>
         <item name="android:windowLightNavigationBar">false</item>
     </style>
