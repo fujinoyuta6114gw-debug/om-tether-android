@@ -26,6 +26,7 @@ def main() -> int:
         APP_SOURCE / "java" / "com" / "example" / "omtether" / "camera" / "OmUsbCameraController.kt",
         APP_SOURCE / "java" / "com" / "example" / "omtether" / "ui" / "OmTetherApp.kt",
         ROOT / "app" / "src" / "test" / "java" / "com" / "example" / "omtether" / "SetupGuidePolicyTest.kt",
+        ROOT / "app" / "src" / "test" / "java" / "com" / "example" / "omtether" / "camera" / "CaptureSavePolicyTest.kt",
     ]
     for path in required_files:
         require(path.is_file(), f"missing required file: {path.relative_to(ROOT)}")
@@ -68,6 +69,11 @@ def main() -> int:
         "explicit RAW/Control connection guide": "0 RAW/Controlを選択済み・接続",
         "setup safe-area handling": "systemBarsPadding",
         "setup back handling": "BackHandler",
+        "phone JPEG or RAW selection": "PhoneSaveFormat",
+        "dual-card object selection": "CaptureSavePolicy",
+        "all-storage object scan": "listOf(0xFFFF_FFFFL, 0L, 0L)",
+        "preview JPEG quality warning": "解像度・画質に制限があります",
+        "persisted phone save choice": "KEY_PHONE_SAVE_FORMAT",
     }
     for label, marker in required_markers.items():
         require(marker in kotlin_source, f"missing implementation marker: {label}")
