@@ -23,7 +23,11 @@ class MainActivity : ComponentActivity() {
             OmTetherTheme {
                 OmTetherApp(
                     state = state,
-                    onUsbConnect = viewModel::requestUsbConnection,
+                    onUsbConnect = viewModel::openUsbConnectionGuide,
+                    onSetupUsbConnect = viewModel::confirmUsbSetupAndConnect,
+                    onDismissConnectionGuide = viewModel::dismissUsbConnectionGuide,
+                    onConfirmConnectionGuide = viewModel::confirmUsbSetupAndConnect,
+                    onRestartLiveView = viewModel::restartLiveView,
                     onDemo = viewModel::startDemo,
                     onCapture = viewModel::capture,
                     onExposureChange = viewModel::setExposure,
