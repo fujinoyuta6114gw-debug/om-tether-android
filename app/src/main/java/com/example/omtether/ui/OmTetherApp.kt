@@ -72,6 +72,7 @@ import com.example.omtether.camera.ExposureControl
 import com.example.omtether.camera.ExposureFormatter
 import com.example.omtether.camera.PhoneSaveFormat
 import com.example.omtether.camera.PtpScalar
+import com.example.omtether.storage.CapturePathPolicy
 import java.util.Locale
 import kotlin.math.max
 
@@ -115,7 +116,7 @@ fun OmTetherApp(
             )
             StatusLine(
                 message = state.statusMessage,
-                actionLabel = if (state.liveViewIssue != null) "再開" else null,
+                actionLabel = if (state.liveViewIssue != null) "再接続" else null,
                 onAction = onRestartLiveView,
             )
             BoxWithConstraints(
@@ -224,7 +225,7 @@ private fun AppHeader(
     val canSwitchController = !state.isCapturing &&
         state.phase !in setOf(ConnectionPhase.CONNECTING, ConnectionPhase.REQUESTING_PERMISSION)
     Column(
-        modifier = Modifier.fillMaxWidth().background(Color(0xFF0E1217)).padding(horizontal = 12.dp, vertical = 8.dp),
+        modifier = Modifier.fillMaxWidth().background(Color(0xFF15171A)).padding(horizontal = 12.dp, vertical = 8.dp),
         verticalArrangement = Arrangement.spacedBy(7.dp),
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -268,12 +269,12 @@ private fun AppHeader(
 @Composable
 private fun PhaseChip(phase: ConnectionPhase) {
     val (label, color) = when (phase) {
-        ConnectionPhase.CONNECTED -> "接続中" to Color(0xFF4ADE80)
-        ConnectionPhase.DEMO -> "DEMO" to Color(0xFF7DD3FC)
-        ConnectionPhase.CONNECTING -> "接続処理" to Color(0xFFFFB000)
-        ConnectionPhase.REQUESTING_PERMISSION -> "許可待ち" to Color(0xFFFFB000)
-        ConnectionPhase.ERROR -> "エラー" to Color(0xFFFF6B6B)
-        ConnectionPhase.DISCONNECTED -> "未接続" to Color(0xFF9CA3AF)
+        ConnectionPhase.CONNECTED -> "接続中" to Color(0xFF8FB39C)
+        ConnectionPhase.DEMO -> "DEMO" to Color(0xFF9DA7B5)
+        ConnectionPhase.CONNECTING -> "接続処理" to Color(0xFFB7B2A8)
+        ConnectionPhase.REQUESTING_PERMISSION -> "許可待ち" to Color(0xFFB7B2A8)
+        ConnectionPhase.ERROR -> "エラー" to Color(0xFFC58E8E)
+        ConnectionPhase.DISCONNECTED -> "未接続" to Color(0xFF8A9098)
     }
     Surface(
         shape = RoundedCornerShape(50),
@@ -298,7 +299,7 @@ private fun StatusLine(
     onAction: () -> Unit = {},
 ) {
     Row(
-        modifier = Modifier.fillMaxWidth().background(Color(0xFF171C22)).padding(horizontal = 12.dp, vertical = 3.dp),
+        modifier = Modifier.fillMaxWidth().background(Color(0xFF202327)).padding(horizontal = 12.dp, vertical = 3.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Text(
@@ -390,7 +391,7 @@ internal fun PreviewPane(
                         .align(Alignment.Center)
                         .fillMaxWidth(0.34f)
                         .fillMaxHeight(0.34f)
-                        .border(2.dp, Color(0xFFFFB000), RoundedCornerShape(8.dp)),
+                        .border(2.dp, MaterialTheme.colorScheme.primary, RoundedCornerShape(8.dp)),
                 )
                 PreviewBadge(
                     text = "グレーカードを枠内へ",
@@ -449,7 +450,7 @@ private fun PreviewBadge(
 ) {
     Surface(
         modifier = modifier,
-        color = if (warning) Color(0xCC8A1C14) else Color(0xB312161B),
+        color = if (warning) Color(0xCC6F3E3E) else Color(0xCC202327),
         shape = RoundedCornerShape(6.dp),
     ) {
         Text(text, modifier = Modifier.padding(horizontal = 7.dp, vertical = 4.dp), fontSize = 11.sp)
@@ -475,7 +476,11 @@ private fun ControlPanel(
         Column(Modifier.fillMaxSize().padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text("撮影コントロール", fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
-                Text("カード1/2対応", color = MaterialTheme.colorScheme.primary, fontSize = 10.sp)
+                Text(
+                    if (state.exposureSyncActive) "カード1/2・露出同期中" else "カード1/2・同期待機",
+                    color = MaterialTheme.colorScheme.primary,
+                    fontSize = 10.sp,
+                )
             }
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -567,7 +572,15 @@ private fun ControlPanel(
             HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant)
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Column(modifier = Modifier.weight(1f)) {
-                    Text("保存先: Pictures/OM Tether", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(
+                        "専用保存先: " +
+                            (state.lastCapture?.files?.firstOrNull()?.relativePath
+                                ?: CapturePathPolicy.DISPLAY_PATH),
+                        fontSize = 10.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
                     Text(
                         state.lastCapture?.files?.takeIf { it.isNotEmpty() }?.joinToString { it.filename }
                             ?: "まだ保存していません",
@@ -592,12 +605,16 @@ private fun ControlPanel(
                     modifier = Modifier.size(78.dp),
                     shape = CircleShape,
                     colors = ButtonDefaults.buttonColors(
-                        containerColor = Color(0xFFFFB000),
-                        contentColor = Color(0xFF201800),
+                        containerColor = MaterialTheme.colorScheme.primary,
+                        contentColor = MaterialTheme.colorScheme.onPrimary,
                     ),
                 ) {
                     if (state.isCapturing) {
-                        CircularProgressIndicator(Modifier.size(28.dp), strokeWidth = 3.dp, color = Color(0xFF201800))
+                        CircularProgressIndicator(
+                            Modifier.size(28.dp),
+                            strokeWidth = 3.dp,
+                            color = MaterialTheme.colorScheme.onPrimary,
+                        )
                     } else {
                         Text("撮影", fontWeight = FontWeight.Black)
                     }
@@ -677,14 +694,14 @@ private fun ExposureRow(
 
 @Composable
 private fun Histogram(histogram: IntArray, modifier: Modifier = Modifier) {
-    Canvas(modifier = modifier.background(Color(0xFF090B0E), RoundedCornerShape(5.dp)).border(1.dp, Color(0xFF2E3742), RoundedCornerShape(5.dp))) {
+    Canvas(modifier = modifier.background(Color(0xFF111315), RoundedCornerShape(5.dp)).border(1.dp, Color(0xFF3B3F45), RoundedCornerShape(5.dp))) {
         val peak = max(1, histogram.maxOrNull() ?: 1)
         val barWidth = size.width / histogram.size.coerceAtLeast(1)
         histogram.forEachIndexed { index, count ->
             val x = index * barWidth
             val y = size.height - (count.toFloat() / peak * size.height)
             drawLine(
-                color = Color(0xFFCBD5E1),
+                color = Color(0xFFC8CCD2),
                 start = Offset(x, size.height),
                 end = Offset(x, y),
                 strokeWidth = max(1f, barWidth),
