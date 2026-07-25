@@ -3,7 +3,6 @@ package com.example.omtether.storage
 import android.content.ContentValues
 import android.content.Context
 import android.net.Uri
-import android.os.Environment
 import android.provider.MediaStore
 import com.example.omtether.camera.DownloadedObject
 import kotlinx.coroutines.Dispatchers
@@ -17,6 +16,7 @@ data class SavedObject(
     val uri: Uri,
     val mimeType: String,
     val byteCount: Int,
+    val relativePath: String,
 )
 
 class CaptureStorage(private val context: Context) {
@@ -36,13 +36,11 @@ class CaptureStorage(private val context: Context) {
             MediaStore.Files.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
         }
         val datedFolder = SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())
+        val relativePath = CapturePathPolicy.relativePath(datedFolder)
         val values = ContentValues().apply {
             put(MediaStore.MediaColumns.DISPLAY_NAME, filename)
             put(MediaStore.MediaColumns.MIME_TYPE, mimeType)
-            put(
-                MediaStore.MediaColumns.RELATIVE_PATH,
-                "${Environment.DIRECTORY_PICTURES}/OM Tether/$datedFolder",
-            )
+            put(MediaStore.MediaColumns.RELATIVE_PATH, relativePath)
             put(MediaStore.MediaColumns.IS_PENDING, 1)
         }
         val uri = resolver.insert(collection, values)
@@ -52,13 +50,20 @@ class CaptureStorage(private val context: Context) {
                 output.write(item.bytes)
                 output.flush()
             } ?: error("MediaStore could not open $filename")
-            resolver.update(
+            val publishedRows = resolver.update(
                 uri,
                 ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) },
                 null,
                 null,
             )
-            return SavedObject(filename, uri, mimeType, item.bytes.size)
+            check(publishedRows > 0) { "MediaStore could not publish $filename" }
+            return SavedObject(
+                filename = filename,
+                uri = uri,
+                mimeType = mimeType,
+                byteCount = item.bytes.size,
+                relativePath = relativePath.trimEnd('/'),
+            )
         } catch (error: Throwable) {
             // This removes only the new, incomplete MediaStore row created above.
             resolver.delete(uri, null, null)
