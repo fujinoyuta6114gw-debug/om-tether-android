@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- OM SYSTEM OM-1 Mark II: VID 0x33A2, PID 0x0136. -->
+    <usb-device vendor-id="13218" product-id="310" />
+</resources>
