@@ -1,6 +1,7 @@
 package com.example.omtether.camera
 
 import kotlinx.coroutines.flow.Flow
+import java.util.Locale
 
 interface CameraController {
     val frames: Flow<ByteArray>
@@ -49,25 +50,52 @@ object ExposureFormatter {
     }
 
     fun format(code: Int, raw: Long): String = when (code) {
-        Ptp.PROP_APERTURE, Ptp.PROP_STANDARD_F_NUMBER -> {
-            if (raw == 0L) "Auto" else if (raw in 80L..6400L) "f/%.1f".format(raw / 100.0) else rawLabel(raw)
+        Ptp.PROP_APERTURE -> {
+            if (raw == 0L) "Auto" else "f/%.1f".format(Locale.US, raw / 10.0)
+        }
+        Ptp.PROP_STANDARD_F_NUMBER -> {
+            if (raw == 0L) "Auto" else "f/%.1f".format(Locale.US, raw / 100.0)
         }
         Ptp.PROP_STANDARD_EXPOSURE_TIME -> formatStandardExposureTime(raw)
-        Ptp.PROP_SHUTTER_SPEED -> rawLabel(raw)
-        Ptp.PROP_ISO, Ptp.PROP_STANDARD_EXPOSURE_INDEX -> if (raw == 0L) "AUTO" else "ISO $raw"
-        Ptp.PROP_EXPOSURE_COMPENSATION, Ptp.PROP_STANDARD_EXPOSURE_BIAS -> {
-            if (raw in -10_000L..10_000L) "%+.1f EV".format(raw / 1000.0) else rawLabel(raw)
+        Ptp.PROP_SHUTTER_SPEED -> formatOlympusShutter(raw)
+        Ptp.PROP_ISO -> when (raw and 0xFFFFL) {
+            0xFFFFL -> "AUTO"
+            0xFFFDL -> "LOW"
+            else -> "ISO ${raw and 0xFFFFL}"
         }
-        Ptp.PROP_WHITE_BALANCE, Ptp.PROP_STANDARD_WHITE_BALANCE -> when (raw) {
+        Ptp.PROP_STANDARD_EXPOSURE_INDEX -> if (raw == 0L) "AUTO" else "ISO $raw"
+        Ptp.PROP_EXPOSURE_COMPENSATION -> {
+            val signed = (raw and 0xFFFFL).toShort().toInt()
+            "%+.1f EV".format(Locale.US, signed / 1000.0)
+        }
+        Ptp.PROP_STANDARD_EXPOSURE_BIAS -> {
+            val signed = (raw and 0xFFFFL).toShort().toInt()
+            "%+.1f EV".format(Locale.US, signed / 1000.0)
+        }
+        Ptp.PROP_WHITE_BALANCE -> when (raw and 0xFFFFL) {
+            1L -> "AUTO"
+            2L -> "Daylight"
+            3L -> "Shade"
+            4L -> "Cloudy"
+            5L -> "Tungsten"
+            6L -> "Fluorescent"
+            7L -> "Underwater"
+            8L -> "Flash"
+            9L -> "Preset 1"
+            10L -> "Preset 2"
+            11L -> "Preset 3"
+            12L -> "Preset 4"
+            13L -> "Custom"
+            else -> rawLabel(raw)
+        }
+        Ptp.PROP_STANDARD_WHITE_BALANCE -> when (raw) {
             1L -> "Manual"
-            2L -> "Auto"
+            2L -> "AUTO"
             3L -> "One-touch"
             4L -> "Daylight"
             5L -> "Fluorescent"
             6L -> "Tungsten"
             7L -> "Flash"
-            0x8001L -> "Shade"
-            0x8002L -> "Cloudy"
             else -> rawLabel(raw)
         }
         else -> rawLabel(raw)
@@ -87,9 +115,36 @@ object ExposureFormatter {
         if (raw <= 0L) return "Bulb/Auto"
         val seconds = raw / 10_000.0
         return when {
-            seconds >= 1.0 -> if (seconds % 1.0 == 0.0) "${seconds.toInt()} s" else "%.1f s".format(seconds)
-            seconds > 0.0 -> "1/${(1.0 / seconds).toInt()}"
+            seconds >= 1.0 -> if (seconds % 1.0 == 0.0) "${seconds.toInt()} s" else "%.1f s".format(Locale.US, seconds)
+            seconds > 0.0 -> "1/${(1.0 / seconds).toInt().coerceAtLeast(1)}"
             else -> rawLabel(raw)
+        }
+    }
+
+    private fun formatOlympusShutter(raw: Long): String {
+        val packed = raw and 0xFFFF_FFFFL
+        when (packed) {
+            0xFFFF_FFFCL -> return "Bulb"
+            0xFFFF_FFFBL -> return "Time"
+            0xFFFF_FFFAL -> return "Composite"
+        }
+        var numerator = ((packed ushr 16) and 0xFFFFL).toInt()
+        var denominator = (packed and 0xFFFFL).toInt()
+        if (numerator == 0 || denominator == 0) return rawLabel(raw)
+
+        // OM bodies commonly encode 1/125 as 10/1250. Reduce the shared decimal
+        // factor before presenting it.
+        while (numerator % 10 == 0 && denominator % 10 == 0) {
+            numerator /= 10
+            denominator /= 10
+        }
+        return when {
+            denominator == 1 -> "$numerator s"
+            numerator < denominator -> "$numerator/$denominator"
+            else -> {
+                val seconds = numerator.toDouble() / denominator
+                if (seconds % 1.0 == 0.0) "${seconds.toInt()} s" else "%.1f s".format(Locale.US, seconds)
+            }
         }
     }
 
