@@ -19,6 +19,7 @@ import com.example.omtether.camera.CameraIdentity
 import com.example.omtether.camera.ExposureControl
 import com.example.omtether.camera.MockCameraController
 import com.example.omtether.camera.OmUsbCameraController
+import com.example.omtether.camera.PhoneSaveFormat
 import com.example.omtether.camera.Ptp
 import com.example.omtether.camera.PtpScalar
 import com.example.omtether.image.ImageAnalysis
@@ -53,6 +54,7 @@ data class LastCapture(
     val files: List<SavedObject>,
     val demo: Boolean,
     val failures: List<String> = emptyList(),
+    val previewJpegFallbackUsed: Boolean = false,
 )
 
 data class DisplayCalibration(
@@ -75,6 +77,7 @@ data class MainUiState(
     val highlightThreshold: Float = 0.97f,
     val highlightPercent: Float = 0f,
     val exposureControls: List<ExposureControl> = emptyList(),
+    val phoneSaveFormat: PhoneSaveFormat = PhoneSaveFormat.JPEG,
     val isCapturing: Boolean = false,
     val lastCapture: LastCapture? = null,
     val showConnectionGuide: Boolean = true,
@@ -98,6 +101,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         MainUiState(
             showSetupGuide = !preferences.getBoolean(KEY_SETUP_COMPLETE, false),
             displayCalibration = savedDisplayCalibration(),
+            phoneSaveFormat = savedPhoneSaveFormat(),
         ),
     )
     val state: StateFlow<MainUiState> = mutableState.asStateFlow()
@@ -203,6 +207,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun capture() {
         val requestedController = controller ?: return
         if (captureJob?.isActive == true) return
+        val requestedSaveFormat = mutableState.value.phoneSaveFormat
         reviewJob?.cancel()
         mutableState.update {
             it.copy(
@@ -211,7 +216,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 reviewHighlightOverlay = null,
                 reviewHistogram = IntArray(256),
                 reviewHighlightPercent = 0f,
-                statusMessage = "撮影して保存しています…",
+                statusMessage = when (requestedSaveFormat) {
+                    PhoneSaveFormat.JPEG -> "撮影してJPEGを保存しています…"
+                    PhoneSaveFormat.RAW -> "撮影してRAWを保存しています…"
+                },
             )
         }
         captureJob = viewModelScope.launch {
@@ -225,6 +233,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 val failures = mutableListOf<String>()
                 try {
                     val report = requestedController.capture(
+                        phoneSaveFormat = requestedSaveFormat,
                         onPreview = { jpeg ->
                             if (controller === requestedController) showCaptureReview(jpeg)
                         },
@@ -251,6 +260,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                                 val reason = failures.firstOrNull()?.take(120) ?: "保存可能な画像がありません"
                                 "保存失敗: $reason"
                             }
+                            report.previewJpegFallbackUsed ->
+                                saved.joinToString(prefix = "保存完了: ") { it.filename } +
+                                    "（プレビューJPEG・画質制限あり）"
                             failures.isEmpty() -> saved.joinToString(prefix = "保存完了: ") { it.filename }
                             else -> saved.joinToString(prefix = "一部保存完了: ") { it.filename } +
                                 "（警告${failures.size}件）"
@@ -261,6 +273,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                                     files = saved.toList(),
                                     demo = requestedController is MockCameraController,
                                     failures = failures.distinct(),
+                                    previewJpegFallbackUsed = report.previewJpegFallbackUsed,
                                 ),
                                 statusMessage = status,
                             )
@@ -284,6 +297,22 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     }
                 }
             }
+        }
+    }
+
+    fun setPhoneSaveFormat(format: PhoneSaveFormat) {
+        if (mutableState.value.isCapturing) return
+        preferences.edit().putString(KEY_PHONE_SAVE_FORMAT, format.name).apply()
+        mutableState.update {
+            it.copy(
+                phoneSaveFormat = format,
+                statusMessage = when (format) {
+                    PhoneSaveFormat.JPEG ->
+                        "スマホ保存：JPEG（カード1/2のフルJPEGを優先）"
+                    PhoneSaveFormat.RAW ->
+                        "スマホ保存：RAW（カード1/2のORFを検索）"
+                },
+            )
         }
     }
 
@@ -436,7 +465,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun diagnosticsText(): String = controller?.diagnosticsText()
-        ?: "OM Tether 0.2.2\nCamera controller is not active."
+        ?: "OM Tether 0.3.0\nCamera controller is not active."
 
     fun restartLiveView() {
         val requestedController = controller ?: return
@@ -639,7 +668,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         current.liveBitmap == null ||
                         current.liveViewIssue != null
                     ) {
-                        "ライブビュー受信中 — RAW+JPEGで撮影できます"
+                        when (current.phoneSaveFormat) {
+                            PhoneSaveFormat.JPEG -> "ライブビュー受信中 — スマホへJPEG保存"
+                            PhoneSaveFormat.RAW -> "ライブビュー受信中 — スマホへRAW保存"
+                        }
                     } else {
                         current.statusMessage
                     },
@@ -854,6 +886,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         brightness = preferences.getFloat(KEY_BRIGHTNESS, 0f).coerceIn(-0.15f, 0.15f),
     )
 
+    private fun savedPhoneSaveFormat(): PhoneSaveFormat = runCatching {
+        PhoneSaveFormat.valueOf(
+            preferences.getString(KEY_PHONE_SAVE_FORMAT, PhoneSaveFormat.JPEG.name)
+                ?: PhoneSaveFormat.JPEG.name,
+        )
+    }.getOrDefault(PhoneSaveFormat.JPEG)
+
     @Suppress("DEPRECATION")
     private fun Intent.usbDevice(): UsbDevice? = if (Build.VERSION.SDK_INT >= 33) {
         getParcelableExtra(UsbManager.EXTRA_DEVICE, UsbDevice::class.java)
@@ -875,5 +914,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         private const val KEY_TEMPERATURE = "temperature"
         private const val KEY_TINT = "tint"
         private const val KEY_BRIGHTNESS = "brightness"
+        private const val KEY_PHONE_SAVE_FORMAT = "phone_save_format"
     }
 }
