@@ -10,6 +10,7 @@ interface CameraController {
     suspend fun startLiveView()
     suspend fun stopLiveView()
     suspend fun capture(
+        phoneSaveFormat: PhoneSaveFormat,
         onPreview: suspend (ByteArray) -> Unit,
         onObject: suspend (DownloadedObject) -> Unit,
     ): CaptureReport
@@ -17,6 +18,53 @@ interface CameraController {
     suspend fun disconnect()
     fun forceClose()
     fun diagnosticsText(): String
+}
+
+enum class PhoneSaveFormat {
+    JPEG,
+    RAW,
+}
+
+/**
+ * Selects one camera object for the Android copy without assuming a card slot.
+ *
+ * GetObjectHandles is requested across all storages, so [PtpObjectInfo.storageId] may identify
+ * card 1 or card 2. If both cards contain the requested type, the largest object
+ * is preferred and no duplicate Android copy is created.
+ */
+object CaptureSavePolicy {
+    fun isJpeg(info: PtpObjectInfo): Boolean =
+        info.format == JPEG_OBJECT_FORMAT ||
+            info.filename.endsWith(".jpg", ignoreCase = true) ||
+            info.filename.endsWith(".jpeg", ignoreCase = true)
+
+    fun isRaw(info: PtpObjectInfo): Boolean =
+        info.filename.endsWith(".orf", ignoreCase = true)
+
+    fun selectPreferred(
+        format: PhoneSaveFormat,
+        candidates: List<PtpObjectInfo>,
+    ): PtpObjectInfo? = orderedPreferred(format, candidates).firstOrNull()
+
+    fun orderedPreferred(
+        format: PhoneSaveFormat,
+        candidates: List<PtpObjectInfo>,
+    ): List<PtpObjectInfo> = candidates
+        .asSequence()
+        .filter { info ->
+            when (format) {
+                PhoneSaveFormat.JPEG -> isJpeg(info)
+                PhoneSaveFormat.RAW -> isRaw(info)
+            }
+        }
+        .sortedWith(
+            compareByDescending<PtpObjectInfo> { it.compressedSize }
+                .thenByDescending { it.imageWidth * it.imageHeight }
+                .thenByDescending { it.storageId },
+        )
+        .toList()
+
+    const val JPEG_OBJECT_FORMAT = 0x3801
 }
 
 object ExposureFormatter {
