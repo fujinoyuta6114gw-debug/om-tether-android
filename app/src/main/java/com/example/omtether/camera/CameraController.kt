@@ -14,6 +14,7 @@ interface CameraController {
         onPreview: suspend (ByteArray) -> Unit,
         onObject: suspend (DownloadedObject) -> Unit,
     ): CaptureReport
+    suspend fun refreshExposureControls(): List<ExposureControl>
     suspend fun setExposure(propertyCode: Int, value: PtpScalar): List<ExposureControl>
     suspend fun disconnect()
     fun forceClose()
