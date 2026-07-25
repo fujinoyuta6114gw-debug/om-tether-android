@@ -30,6 +30,7 @@
 | ChangedProperties | `0x9486` | 撮影後の変更通知読み取り |
 | PC mode | `0xD052` | OM‑1 Mark IIの機種二重確認後、UINT16の1へ設定。非掲載ボディがあるため記述子未掲載時も初期化を試行 |
 | LiveView mode | `0xD06D` | 記述子を優先確認し、非掲載時も既知のUINT32 `0x04000300` で初期化を試行 |
+| Capture target | `0xD0DC` | シャッター命令直前の撮影先診断（読み取りのみ） |
 | Aperture / ISO / Exposure compensation | `0xD002` / `0xD007` / `0xD008` | 記述子の列挙値から操作 |
 | Image format / Shutter speed / White balance | `0xD00D` / `0xD01C` / `0xD01E` | 画質は読み取りのみ、露出関連は記述子の列挙値から操作 |
 
@@ -37,11 +38,13 @@
 
 v0.1.1では、通知直後にオブジェクトが未確定の場合を考慮し、`GetObjectInfo`、`GetThumb`、`GetObject` が `DeviceBusy` または `InvalidObjectHandle` を返した場合だけ、待機時間を延ばしながら最大6回再試行します。先に全ObjectInfoを読み、JPEG候補をRAWより先に処理します。サムネイルが公開されている場合は本体転送前に撮影プレビューへ渡します。
 
+v0.2.2ではOM独自プロパティを公開実装の形式に合わせて表示します。絞り `0xD002` は10倍値、シャッター `0xD01C` は上位16bitの分子／下位16bitの分母、露出補正 `0xD008` は符号付き16bitの1/1000 EVとして解釈します。ISOの `0xFFFF` / `0xFFFD` はAUTO / LOWとして扱います。
+
 ## コンテナと制限
 
 PTP USBコンテナはlittle-endianで、`length:u32, type:u16, code:u16, transactionId:u32` の12バイトヘッダーにパラメータまたはデータが続きます。typeはcommand=1、data=2、response=3、event=4です。セッション外のGetDeviceInfoとOpenSessionには予約済みtransaction ID 0を使い、セッション内の最初の命令から1ずつ増加させます。
 
-試作ではコンテナ長を12バイト以上128 MiB以下に制限します。RAW受信時はコンテナ全体とpayloadを二重確保せず、12バイトのヘッダー確認後にpayloadだけを確保します。response code `0x2001` 以外は例外として診断ログへ残し、ライブビューの `DeviceBusy (0x2019)` と上記オブジェクト確定待ちだけを再試行します。
+試作ではコンテナ長を12バイト以上128 MiB以下に制限します。RAW受信時はコンテナ全体とpayloadを二重確保せず、12バイトのヘッダー確認後にpayloadだけを確保します。USBのデータ長が最大パケットの整数倍になった際のゼロ長パケットは読み飛ばし、中断された前トランザクションの応答が残っていた場合は排出して現在のtransaction IDまで再同期します。response code `0x2001` 以外は例外として診断ログへ残し、ライブビューの `DeviceBusy (0x2019)` と上記オブジェクト確定待ちだけを再試行します。
 
 ## 明示的に実装しない命令
 
@@ -58,6 +61,7 @@ PTP USBコンテナはlittle-endianで、`length:u32, type:u16, code:u16, transa
 
 - <https://github.com/gphoto/libgphoto2/blob/master/camlibs/ptp2/ptp.h>
 - <https://github.com/gphoto/libgphoto2/blob/master/camlibs/ptp2/library.c>
+- <https://github.com/gphoto/libgphoto2/blob/master/camlibs/ptp2/config.c>
 - <https://github.com/gphoto/libgphoto2/blob/master/NEWS>
 
 libgphoto2はGNU LGPL 2.0以降です。本プロジェクトはlibgphoto2のバイナリやソースを同梱せず、公開されたPTP数値と標準コンテナ仕様を参照してKotlinで独立実装しています。将来libgphoto2をAndroid nativeライブラリとして組み込む場合は、LGPLの再リンク・ソース提供等の条件を別途満たす必要があります。
