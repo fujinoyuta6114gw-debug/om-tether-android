@@ -34,11 +34,13 @@
 | Aperture / ISO / Exposure compensation | `0xD002` / `0xD007` / `0xD008` | 記述子の列挙値から操作 |
 | Image format / Shutter speed / White balance | `0xD00D` / `0xD01C` / `0xD01E` | 画質は読み取りのみ、露出関連は記述子の列挙値から操作 |
 
-イベント通知の既知値は標準ObjectAdded `0x4002`、Olympus `0xC002`、OM‑1 Mark II系 `0xC102` です。この試作は割り込みINエンドポイントがある場合に3種類をすべて受け取り、撮影前後の `GetObjectHandles` 差分も並行して確認します。割り込み通知とカード上の差分のどちらも得られない場合は、`GetImage` を読み取り専用フォールバックにしています。
+イベント通知の既知値は標準ObjectAdded `0x4002`、Olympus `0xC002`、OM‑1 Mark II系 `0xC102` です。この試作は割り込みINエンドポイントがある場合に3種類をすべて受け取り、撮影前後の `GetObjectHandles` 差分も並行して確認します。`GetObjectHandles` のstorage IDには `0xFFFFFFFF`（全ストレージ）を指定するため、カード1／カード2のどちらへ作成されたオブジェクトも候補になります。割り込み通知とカード上の差分のどちらも得られない場合は、`GetImage` を読み取り専用フォールバックにしています。
 
 v0.1.1では、通知直後にオブジェクトが未確定の場合を考慮し、`GetObjectInfo`、`GetThumb`、`GetObject` が `DeviceBusy` または `InvalidObjectHandle` を返した場合だけ、待機時間を延ばしながら最大6回再試行します。先に全ObjectInfoを読み、JPEG候補をRAWより先に処理します。サムネイルが公開されている場合は本体転送前に撮影プレビューへ渡します。
 
 v0.2.2ではOM独自プロパティを公開実装の形式に合わせて表示します。絞り `0xD002` は10倍値、シャッター `0xD01C` は上位16bitの分子／下位16bitの分母、露出補正 `0xD008` は符号付き16bitの1/1000 EVとして解釈します。ISOの `0xFFFF` / `0xFFFD` はAUTO / LOWとして扱います。
+
+v0.3.0では全ObjectInfoのstorage ID、ファイル名、形式、サイズを確認し、Androidで選択したJPEGまたはORFだけを転送します。同形式が複数ストレージにある場合は大きい候補から試し、最初に正常取得できた1件で終了します。JPEGが生成されていない場合に限り、RAWの `GetThumb` 結果またはOMD `GetImage` をプレビューJPEGとして保存し、フルJPEGではないことをUIと診断に明記します。これらはすべて読み取り命令で、カメラ側の画質・保存先・既存オブジェクトは変更しません。
 
 ## コンテナと制限
 
