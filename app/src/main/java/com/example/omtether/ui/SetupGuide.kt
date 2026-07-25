@@ -12,11 +12,13 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.MaterialTheme
@@ -149,11 +151,17 @@ private fun AndroidDisplayStep() {
 
 @Composable
 private fun CameraConnectionStep(state: MainUiState, onUsbConnect: () -> Unit) =
-    GuideBody("カメラを準備して接続", "OM‑1 Mark II側を設定してからUSB-Cデータケーブルで直結します。") {
-        Checklist("USB接続モード：RAW/Control")
-        Checklist("画質：RAW+JPEG")
-        Checklist("カメラのモニター調整は標準値に戻す")
-        Checklist("充電専用ではないUSB-Cケーブルを使用")
+    GuideBody("0 RAW/Controlで接続", "この順番でOM‑1 Mark IIとAndroidを直結します。") {
+        Checklist("カメラの電源をOFF")
+        Checklist("USB-Cデータケーブルを接続（充電専用ケーブルは不可）")
+        Checklist("カメラの電源をON")
+        Checklist("カメラ画面で［0 RAW/Control］を選び、OKボタン")
+        Checklist("画質をRAW+JPEGに設定")
+        Notice(
+            "選択画面が出ない場合：MENU → e → 3. モニター/音/接続 → USBの設定 → " +
+                "USB接続モード → 毎回確認",
+        )
+        Notice("USB PD／ストレージ／MTP／ウェブカメラではテザー操作できません。", warning = true)
         val connected = state.phase == ConnectionPhase.CONNECTED
         val connectionMessage = when (state.phase) {
             ConnectionPhase.CONNECTED -> "実機接続を確認しました：${state.identity?.displayName ?: "OM‑1 Mark II"}"
@@ -169,6 +177,68 @@ private fun CameraConnectionStep(state: MainUiState, onUsbConnect: () -> Unit) =
             modifier = Modifier.fillMaxWidth(),
         ) { Text(if (connected) "実機を再確認" else "USB接続を確認") }
     }
+
+@Composable
+internal fun UsbConnectionGuide(
+    statusMessage: String,
+    onDismiss: () -> Unit,
+    onConfirm: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("OM‑1 Mark II 接続手順") },
+        text = {
+            Column(
+                modifier = Modifier.fillMaxWidth().heightIn(max = 520.dp).verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                Text("USBを挿す前から、次の順番で操作してください。")
+                ConnectionStep(1, "カメラの電源をOFF")
+                ConnectionStep(2, "USB-CデータケーブルでAndroidと直結")
+                ConnectionStep(3, "カメラの電源をON")
+                ConnectionStep(4, "カメラ画面で［0 RAW/Control］を選択し、OK")
+                ConnectionStep(5, "必要なら画質をRAW+JPEGに設定")
+                Notice(
+                    "選択画面が出ない場合：MENU → e → 3. モニター/音/接続 → USBの設定 → " +
+                        "USB接続モード → 毎回確認",
+                )
+                Notice("USB PD／ストレージ／MTP／ウェブカメラは選ばないでください。", warning = true)
+                Text(
+                    "現在：$statusMessage",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontSize = 12.sp,
+                )
+            }
+        },
+        confirmButton = {
+            Button(onClick = onConfirm) { Text("0 RAW/Controlを選択済み・接続") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("あとで") }
+        },
+    )
+}
+
+@Composable
+private fun ConnectionStep(number: Int, text: String) {
+    Row(
+        verticalAlignment = Alignment.Top,
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        Surface(
+            color = MaterialTheme.colorScheme.primary,
+            shape = RoundedCornerShape(50),
+        ) {
+            Text(
+                number.toString(),
+                modifier = Modifier.padding(horizontal = 9.dp, vertical = 4.dp),
+                color = MaterialTheme.colorScheme.onPrimary,
+                fontWeight = FontWeight.Bold,
+            )
+        }
+        Text(text, modifier = Modifier.padding(top = 4.dp))
+    }
+}
 
 @Composable
 private fun GrayCardStep(
