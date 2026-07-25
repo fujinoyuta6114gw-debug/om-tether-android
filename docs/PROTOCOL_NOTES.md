@@ -42,6 +42,8 @@ v0.2.2ではOM独自プロパティを公開実装の形式に合わせて表示
 
 v0.3.0では全ObjectInfoのstorage ID、ファイル名、形式、サイズを確認し、Androidで選択したJPEGまたはORFだけを転送します。同形式が複数ストレージにある場合は大きい候補から試し、最初に正常取得できた1件で終了します。JPEGが生成されていない場合に限り、RAWの `GetThumb` 結果またはOMD `GetImage` をプレビューJPEGとして保存し、フルJPEGではないことをUIと診断に明記します。これらはすべて読み取り命令で、カメラ側の画質・保存先・既存オブジェクトは変更しません。
 
+v0.3.1では露出表示の同期用に、取得済み記述子のデータ型を使って `GetDevicePropValue` を約1.8秒間隔で実行します。ライブビュー、撮影、露出変更と同じ直列化経路を通すため、PTPトランザクションを並行送信しません。DeviceInfoのプロパティ一覧にない場合も、既知のOM固有コードと標準PTPコードへ `GetDevicePropDesc` を安全に試し、正常応答があった項目だけを表示します。停止後の復旧時は古いUSB接続を閉じ、DeviceInfo取得とOpenSessionからやり直します。
+
 ## コンテナと制限
 
 PTP USBコンテナはlittle-endianで、`length:u32, type:u16, code:u16, transactionId:u32` の12バイトヘッダーにパラメータまたはデータが続きます。typeはcommand=1、data=2、response=3、event=4です。セッション外のGetDeviceInfoとOpenSessionには予約済みtransaction ID 0を使い、セッション内の最初の命令から1ずつ増加させます。
