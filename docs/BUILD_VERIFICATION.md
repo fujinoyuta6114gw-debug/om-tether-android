@@ -1,6 +1,17 @@
 # Build and verification record
 
-確認日: 2026-07-25
+確認日: 2026-07-26
+
+## v0.3.0保存形式・デュアルカード対応
+
+- Android保存をJPEG／RAWの2択にし、選択を端末へ記憶
+- 全ストレージのObjectInfoからJPEG／ORF候補を分離し、同形式が両カードにある場合は大きい候補から1件だけ取得
+- 優先カード側の転送失敗時に、同形式の別カード候補を試す経路を追加
+- JPEG不在時のRAWプレビューJPEG代替保存と画質制限警告を追加
+- RAW選択時はORFだけを保存し、取得したJPEGはプレビュー用途に限定
+- カード1＝RAW／カード2＝JPEG、および同形式の二重記録を模した選別単体テストを追加
+
+v0.3.0はGitHub Actionsで単体テストとAPK生成を行った後、カード1／カード2の割り当てを入れ替えてJPEG・RAW各1枚を実機確認します。
 
 ## v0.2.2実機フィードバック対応
 
@@ -51,7 +62,7 @@ v0.2.2はGitHub Actionsで単体テストとAPK生成を行った後、実機で
 
 - Android Gradle PluginによるAPK生成（Android SDK／Gradleが実行環境にないため）
 - Compose UIのAndroid実機レンダリング
-- 修正後v0.2.2での30秒以上のライブビュー、シャッター、JPEG／ORF転送
+- 修正後v0.3.0での30秒以上のライブビュー、シャッター、カード1/2別のJPEG／ORF選択転送
 - 長時間・連写・ケーブル抜去テスト
 - 実機でのバックグラウンド移行／復帰と、保存容量不足時の部分成功表示
 
@@ -76,5 +87,5 @@ Gradle Wrapperをまだ生成していない場合はREADMEの手順に従いま
 | Android build | lint以外のcompile errorなし、debug APK生成 |
 | USB read-only | VID/PID、メーカー、機種、能力一覧が診断に出る |
 | Live view | 30秒以上継続し、切断で復帰可能 |
-| Single capture | JPG/ORFが1組保存され、SDカード上の元画像も残る |
+| Single capture | 選択したJPGまたはORFが1件だけ保存され、SDカード上の元画像も残る |
 | Field candidate | 50枚連続と30分ライブビューに欠落・破損・停止なし |
