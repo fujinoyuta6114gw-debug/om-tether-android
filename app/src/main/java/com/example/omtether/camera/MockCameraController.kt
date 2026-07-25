@@ -57,6 +57,7 @@ class MockCameraController : CameraController {
     }
 
     override suspend fun capture(
+        phoneSaveFormat: PhoneSaveFormat,
         onPreview: suspend (ByteArray) -> Unit,
         onObject: suspend (DownloadedObject) -> Unit,
     ): CaptureReport {
@@ -68,6 +69,11 @@ class MockCameraController : CameraController {
         onObject(downloaded)
         return CaptureReport(
             objects = listOf(CaptureObjectSummary(null, filename, 0x3801, bytes.size)),
+            warnings = if (phoneSaveFormat == PhoneSaveFormat.RAW) {
+                listOf("デモモードは実機RAWを生成できないため、JPEGサンプルを保存しました")
+            } else {
+                emptyList()
+            },
         )
     }
 
