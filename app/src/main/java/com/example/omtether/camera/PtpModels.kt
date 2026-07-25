@@ -34,6 +34,7 @@ object Ptp {
     const val PROP_WHITE_BALANCE = 0xD01E
     const val PROP_PC_MODE = 0xD052
     const val PROP_LIVE_VIEW_MODE = 0xD06D
+    const val PROP_CAPTURE_TARGET = 0xD0DC
 
     const val PROP_STANDARD_WHITE_BALANCE = 0x5005
     const val PROP_STANDARD_F_NUMBER = 0x5007
