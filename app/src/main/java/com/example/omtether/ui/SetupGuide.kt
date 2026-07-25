@@ -69,7 +69,7 @@ internal fun SetupGuide(
     }
     Surface(
         modifier = Modifier.fillMaxSize(),
-        color = Color(0xFF0B0E12),
+        color = Color(0xFF111315),
     ) {
         Column(Modifier.fillMaxSize().systemBarsPadding().padding(16.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -81,7 +81,7 @@ internal fun SetupGuide(
             Surface(
                 modifier = Modifier.fillMaxWidth().weight(1f),
                 shape = RoundedCornerShape(16.dp),
-                color = Color(0xFF151A21),
+                color = Color(0xFF1B1E21),
             ) {
                 when (state.setupStep) {
                     0 -> IntroStep()
@@ -364,14 +364,14 @@ private fun CalibrationSlider(label: String, value: Float, range: ClosedFloating
 @Composable
 private fun NeutralStatus(result: NeutralPatchResult?, cameraConnected: Boolean) {
     val (message, color) = if (!cameraConnected) {
-        "実機を接続してください" to Color(0xFFFF6B6B)
+        "実機を接続してください" to Color(0xFFC58E8E)
     } else when (assessNeutralPatch(result)) {
-        NeutralPatchAssessment.WAITING -> "ライブビューを待っています" to Color(0xFF9CA3AF)
-        NeutralPatchAssessment.TOO_DARK -> "カードが暗すぎます。光を増やしてください" to Color(0xFFFFB000)
-        NeutralPatchAssessment.TOO_BRIGHT -> "カードが明るすぎます。露出を下げてください" to Color(0xFFFFB000)
-        NeutralPatchAssessment.GOOD -> "WBは良好です" to Color(0xFF4ADE80)
-        NeutralPatchAssessment.CLOSE -> "あと少しです。必要ならカメラ側で微調整" to Color(0xFFFFB000)
-        NeutralPatchAssessment.NEEDS_WB -> "カメラ側でワンタッチWBを実行してください" to Color(0xFFFF6B6B)
+        NeutralPatchAssessment.WAITING -> "ライブビューを待っています" to Color(0xFF9298A0)
+        NeutralPatchAssessment.TOO_DARK -> "カードが暗すぎます。光を増やしてください" to Color(0xFFB7B2A8)
+        NeutralPatchAssessment.TOO_BRIGHT -> "カードが明るすぎます。露出を下げてください" to Color(0xFFB7B2A8)
+        NeutralPatchAssessment.GOOD -> "WBは良好です" to Color(0xFF8FB39C)
+        NeutralPatchAssessment.CLOSE -> "あと少しです。必要ならカメラ側で微調整" to Color(0xFFB7B2A8)
+        NeutralPatchAssessment.NEEDS_WB -> "カメラ側でワンタッチWBを実行してください" to Color(0xFFC58E8E)
     }
     Surface(color = color.copy(alpha = 0.14f), shape = RoundedCornerShape(8.dp)) {
         Text(message, color = color, fontWeight = FontWeight.Bold, modifier = Modifier.fillMaxWidth().padding(10.dp))
@@ -381,7 +381,7 @@ private fun NeutralStatus(result: NeutralPatchResult?, cameraConnected: Boolean)
 @Composable
 private fun Checklist(text: String) {
     Row(horizontalArrangement = Arrangement.spacedBy(9.dp)) {
-        Text("✓", color = Color(0xFF4ADE80), fontWeight = FontWeight.Bold)
+        Text("✓", color = Color(0xFF8FB39C), fontWeight = FontWeight.Bold)
         Text(text)
     }
 }
@@ -391,7 +391,7 @@ private fun StatusItem(text: String, passed: Boolean) {
     Row(horizontalArrangement = Arrangement.spacedBy(9.dp)) {
         Text(
             if (passed) "✓" else "—",
-            color = if (passed) Color(0xFF4ADE80) else Color(0xFFFFB000),
+            color = if (passed) Color(0xFF8FB39C) else Color(0xFFB7B2A8),
             fontWeight = FontWeight.Bold,
         )
         Text(text)
@@ -403,10 +403,10 @@ private fun Notice(text: String, warning: Boolean = false) {
     Text(
         text,
         modifier = Modifier.fillMaxWidth().background(
-            if (warning) Color(0xFF3A211B) else Color(0xFF222A34),
+            if (warning) Color(0xFF332B2B) else Color(0xFF292D31),
             RoundedCornerShape(8.dp),
         ).padding(12.dp),
-        color = if (warning) Color(0xFFFFB4A7) else MaterialTheme.colorScheme.onSurfaceVariant,
+        color = if (warning) Color(0xFFD7B8B3) else MaterialTheme.colorScheme.onSurfaceVariant,
     )
 }
 
