@@ -97,6 +97,33 @@ class PtpCodecTest {
         )
         assertFalse(ExposureFormatter.toControl("ISO", descriptor).writable)
     }
+
+    @Test
+    fun olympusApertureUsesTenths() {
+        assertEquals("f/4.0", ExposureFormatter.format(Ptp.PROP_APERTURE, 40L))
+        assertEquals("f/2.8", ExposureFormatter.format(Ptp.PROP_APERTURE, 28L))
+    }
+
+    @Test
+    fun olympusShutterUnpacksNumeratorAndDenominator() {
+        assertEquals("1/125", ExposureFormatter.format(Ptp.PROP_SHUTTER_SPEED, (1L shl 16) or 125L))
+        assertEquals("30 s", ExposureFormatter.format(Ptp.PROP_SHUTTER_SPEED, (300L shl 16) or 10L))
+        assertEquals("Bulb", ExposureFormatter.format(Ptp.PROP_SHUTTER_SPEED, 0xFFFF_FFFCL))
+    }
+
+    @Test
+    fun olympusExposureCompensationUsesSignedThousandths() {
+        val minusOneThird = (-333).toShort().toLong() and 0xFFFFL
+        assertEquals("-0.3 EV", ExposureFormatter.format(Ptp.PROP_EXPOSURE_COMPENSATION, minusOneThird))
+    }
+
+    @Test
+    fun olympusIsoAndWhiteBalanceSpecialValuesAreNamed() {
+        assertEquals("AUTO", ExposureFormatter.format(Ptp.PROP_ISO, 0xFFFFL))
+        assertEquals("LOW", ExposureFormatter.format(Ptp.PROP_ISO, 0xFFFDL))
+        assertEquals("AUTO", ExposureFormatter.format(Ptp.PROP_WHITE_BALANCE, 1L))
+        assertEquals("Custom", ExposureFormatter.format(Ptp.PROP_WHITE_BALANCE, 13L))
+    }
 }
 
 private fun ByteArrayOutputStream.u16(value: Int) {
