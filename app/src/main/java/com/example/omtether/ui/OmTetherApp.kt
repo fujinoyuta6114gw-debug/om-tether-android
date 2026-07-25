@@ -77,6 +77,10 @@ import kotlin.math.max
 fun OmTetherApp(
     state: MainUiState,
     onUsbConnect: () -> Unit,
+    onSetupUsbConnect: () -> Unit,
+    onDismissConnectionGuide: () -> Unit,
+    onConfirmConnectionGuide: () -> Unit,
+    onRestartLiveView: () -> Unit,
     onDemo: () -> Unit,
     onCapture: () -> Unit,
     onExposureChange: (Int, PtpScalar) -> Unit,
@@ -106,7 +110,11 @@ fun OmTetherApp(
                 onSetupGuide = onOpenSetupGuide,
                 onDiagnostics = { diagnosticsText = diagnostics() },
             )
-            StatusLine(state.statusMessage)
+            StatusLine(
+                message = state.statusMessage,
+                actionLabel = if (state.liveViewIssue != null) "再開" else null,
+                onAction = onRestartLiveView,
+            )
             BoxWithConstraints(
                 modifier = Modifier.fillMaxWidth().weight(1f).padding(10.dp),
             ) {
@@ -125,6 +133,7 @@ fun OmTetherApp(
                             highlightPercent = if (state.reviewBitmap != null) state.reviewHighlightPercent else state.highlightPercent,
                             reviewing = state.reviewBitmap != null,
                             calibration = state.displayCalibration,
+                            emptyMessage = state.liveViewIssue ?: "USB接続またはデモを開始してください",
                             modifier = Modifier.weight(1f).fillMaxHeight(),
                         )
                         ControlPanel(
@@ -151,6 +160,7 @@ fun OmTetherApp(
                             highlightPercent = if (state.reviewBitmap != null) state.reviewHighlightPercent else state.highlightPercent,
                             reviewing = state.reviewBitmap != null,
                             calibration = state.displayCalibration,
+                            emptyMessage = state.liveViewIssue ?: "USB接続またはデモを開始してください",
                             modifier = Modifier.fillMaxWidth().weight(1f),
                         )
                         ControlPanel(
@@ -170,7 +180,7 @@ fun OmTetherApp(
     if (state.showSetupGuide) {
         SetupGuide(
             state = state,
-            onUsbConnect = onUsbConnect,
+            onUsbConnect = onSetupUsbConnect,
             onDismiss = onDismissSetupGuide,
             onNext = onNextSetupStep,
             onPrevious = onPreviousSetupStep,
@@ -179,6 +189,14 @@ fun OmTetherApp(
             onWbConfirmed = onSetupWbConfirmed,
             onGrayCardSkipped = onSetupGrayCardSkipped,
             onComplete = onCompleteSetupGuide,
+        )
+    }
+
+    if (state.showConnectionGuide) {
+        UsbConnectionGuide(
+            statusMessage = state.statusMessage,
+            onDismiss = onDismissConnectionGuide,
+            onConfirm = onConfirmConnectionGuide,
         )
     }
 
@@ -269,15 +287,27 @@ private fun PhaseChip(phase: ConnectionPhase) {
 }
 
 @Composable
-private fun StatusLine(message: String) {
-    Text(
-        text = message,
-        modifier = Modifier.fillMaxWidth().background(Color(0xFF171C22)).padding(horizontal = 12.dp, vertical = 6.dp),
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
-        fontSize = 12.sp,
-        maxLines = 2,
-        overflow = TextOverflow.Ellipsis,
-    )
+private fun StatusLine(
+    message: String,
+    actionLabel: String? = null,
+    onAction: () -> Unit = {},
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth().background(Color(0xFF171C22)).padding(horizontal = 12.dp, vertical = 3.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = message,
+            modifier = Modifier.weight(1f),
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            fontSize = 12.sp,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+        )
+        actionLabel?.let {
+            TextButton(onClick = onAction) { Text(it) }
+        }
+    }
 }
 
 @Composable
