@@ -77,6 +77,8 @@ class MockCameraController : CameraController {
         )
     }
 
+    override suspend fun refreshExposureControls(): List<ExposureControl> = controls
+
     override suspend fun setExposure(propertyCode: Int, value: PtpScalar): List<ExposureControl> {
         controls = controls.map { control ->
             if (control.propertyCode == propertyCode && control.options.any { it.value == value }) {
