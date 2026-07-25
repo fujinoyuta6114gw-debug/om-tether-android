@@ -62,6 +62,10 @@ def main() -> int:
         "explicit WB confirmation": "setupWbConfirmed",
         "setup calibration rollback": "savedDisplayCalibration()",
         "non-cancelling latest-frame buffer": "frames.conflate().collect",
+        "USB zero-length packet recovery": "MAX_ZERO_LENGTH_READS",
+        "stale PTP response recovery": "! stale",
+        "live-view stall recovery": "LIVE_VIEW_STALL_TIMEOUT_MS",
+        "explicit RAW/Control connection guide": "0 RAW/Controlを選択済み・接続",
         "setup safe-area handling": "systemBarsPadding",
         "setup back handling": "BackHandler",
     }
