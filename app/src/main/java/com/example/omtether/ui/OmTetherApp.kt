@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
@@ -69,6 +70,7 @@ import com.example.omtether.DisplayCalibration
 import com.example.omtether.MainUiState
 import com.example.omtether.camera.ExposureControl
 import com.example.omtether.camera.ExposureFormatter
+import com.example.omtether.camera.PhoneSaveFormat
 import com.example.omtether.camera.PtpScalar
 import java.util.Locale
 import kotlin.math.max
@@ -83,6 +85,7 @@ fun OmTetherApp(
     onRestartLiveView: () -> Unit,
     onDemo: () -> Unit,
     onCapture: () -> Unit,
+    onPhoneSaveFormatChange: (PhoneSaveFormat) -> Unit,
     onExposureChange: (Int, PtpScalar) -> Unit,
     onHighlightEnabled: (Boolean) -> Unit,
     onHighlightThreshold: (Float) -> Unit,
@@ -139,6 +142,7 @@ fun OmTetherApp(
                         ControlPanel(
                             state = state,
                             onCapture = onCapture,
+                            onPhoneSaveFormatChange = onPhoneSaveFormatChange,
                             onExposureChange = onExposureChange,
                             onHighlightEnabled = onHighlightEnabled,
                             onHighlightThreshold = onHighlightThreshold,
@@ -166,10 +170,11 @@ fun OmTetherApp(
                         ControlPanel(
                             state = state,
                             onCapture = onCapture,
+                            onPhoneSaveFormatChange = onPhoneSaveFormatChange,
                             onExposureChange = onExposureChange,
                             onHighlightEnabled = onHighlightEnabled,
                             onHighlightThreshold = onHighlightThreshold,
-                            modifier = Modifier.fillMaxWidth().heightIn(min = 300.dp, max = 355.dp),
+                            modifier = Modifier.fillMaxWidth().heightIn(min = 340.dp, max = 400.dp),
                         )
                     }
                 }
@@ -455,6 +460,7 @@ private fun PreviewBadge(
 private fun ControlPanel(
     state: MainUiState,
     onCapture: () -> Unit,
+    onPhoneSaveFormatChange: (PhoneSaveFormat) -> Unit,
     onExposureChange: (Int, PtpScalar) -> Unit,
     onHighlightEnabled: (Boolean) -> Unit,
     onHighlightThreshold: (Float) -> Unit,
@@ -469,8 +475,39 @@ private fun ControlPanel(
         Column(Modifier.fillMaxSize().padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text("撮影コントロール", fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
-                Text("JPG / ORF 自動保存", color = MaterialTheme.colorScheme.primary, fontSize = 10.sp)
+                Text("カード1/2対応", color = MaterialTheme.colorScheme.primary, fontSize = 10.sp)
             }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(7.dp),
+            ) {
+                SaveFormatChoice(
+                    label = "スマホにJPEG",
+                    selected = state.phoneSaveFormat == PhoneSaveFormat.JPEG,
+                    enabled = !state.isCapturing,
+                    onClick = { onPhoneSaveFormatChange(PhoneSaveFormat.JPEG) },
+                    modifier = Modifier.weight(1f),
+                )
+                SaveFormatChoice(
+                    label = "スマホにRAW",
+                    selected = state.phoneSaveFormat == PhoneSaveFormat.RAW,
+                    enabled = !state.isCapturing,
+                    onClick = { onPhoneSaveFormatChange(PhoneSaveFormat.RAW) },
+                    modifier = Modifier.weight(1f),
+                )
+            }
+            Text(
+                text = when (state.phoneSaveFormat) {
+                    PhoneSaveFormat.JPEG ->
+                        "フルJPEG優先。ない場合はRAW内プレビュー（画質制限あり）"
+                    PhoneSaveFormat.RAW ->
+                        "カード1/2を横断してORFを1枚保存"
+                },
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                fontSize = 9.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
             Row(
                 modifier = Modifier.fillMaxWidth().weight(1f),
                 horizontalArrangement = Arrangement.spacedBy(10.dp),
@@ -566,6 +603,35 @@ private fun ControlPanel(
                     }
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun SaveFormatChoice(
+    label: String,
+    selected: Boolean,
+    enabled: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    if (selected) {
+        Button(
+            onClick = onClick,
+            enabled = enabled,
+            modifier = modifier.height(34.dp),
+            contentPadding = PaddingValues(horizontal = 8.dp),
+        ) {
+            Text(label, fontSize = 11.sp, maxLines = 1)
+        }
+    } else {
+        OutlinedButton(
+            onClick = onClick,
+            enabled = enabled,
+            modifier = modifier.height(34.dp),
+            contentPadding = PaddingValues(horizontal = 8.dp),
+        ) {
+            Text(label, fontSize = 11.sp, maxLines = 1)
         }
     }
 }
