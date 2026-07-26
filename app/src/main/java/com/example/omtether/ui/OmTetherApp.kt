@@ -477,7 +477,7 @@ private fun ControlPanel(
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text("撮影コントロール", fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
                 Text(
-                    if (state.exposureSyncActive) "カード1/2・露出同期中" else "カード1/2・同期待機",
+                    if (state.exposureSyncActive) "本体撮影・同期中" else "本体撮影待機",
                     color = MaterialTheme.colorScheme.primary,
                     fontSize = 10.sp,
                 )
@@ -504,9 +504,9 @@ private fun ControlPanel(
             Text(
                 text = when (state.phoneSaveFormat) {
                     PhoneSaveFormat.JPEG ->
-                        "フルJPEG優先。ない場合はRAW内プレビュー（画質制限あり）"
+                        "本体シャッターも自動転送。フルJPEG優先"
                     PhoneSaveFormat.RAW ->
-                        "カード1/2を横断してORFを1枚保存"
+                        "本体シャッターも自動転送。カード1/2からORFを保存"
                 },
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 fontSize = 9.sp,
