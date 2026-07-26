@@ -689,6 +689,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                                 while (
                                     controller === newController &&
                                     generation == frameGeneration &&
+                                    mutableState.value.phase == ConnectionPhase.CONNECTING
+                                ) {
+                                    // Preserve a body-shutter event that arrives while the
+                                    // first JPEG is still being decoded. Connection timeout
+                                    // or controller replacement cancels this job.
+                                    delay(EXTERNAL_CAPTURE_BUSY_RETRY_MS)
+                                }
+                                while (
+                                    controller === newController &&
+                                    generation == frameGeneration &&
                                     mutableState.value.isCapturing
                                 ) {
                                     delay(EXTERNAL_CAPTURE_BUSY_RETRY_MS)
