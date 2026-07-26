@@ -36,6 +36,8 @@
 
 イベント通知の既知値は標準ObjectAdded `0x4002`、Olympus `0xC002`、OM‑1 Mark II系 `0xC102` です。この試作は割り込みINエンドポイントがある場合に3種類をすべて受け取り、撮影前後の `GetObjectHandles` 差分も並行して確認します。`GetObjectHandles` のstorage IDには `0xFFFFFFFF`（全ストレージ）を指定するため、カード1／カード2のどちらへ作成されたオブジェクトも候補になります。割り込み通知とカード上の差分のどちらも得られない場合は、`GetImage` を読み取り専用フォールバックにしています。
 
+v0.3.2ではObjectAddedの監視をアプリ内シャッター待機時だけでなく接続中ずっと継続し、カメラ本体シャッターで作成されたハンドルも転送対象にします。割り込み通知がない場合は約1.2秒ごとに全ストレージのハンドル集合を照合します。接続時の既存ハンドルは基準として除外し、イベントとポーリングで同じハンドルを見つけても1回だけ扱います。RAW／JPEGがカード1／2へ時間差で追加される場合に備え、追加が静まるまで短時間まとめてから保存形式を選別します。
+
 v0.1.1では、通知直後にオブジェクトが未確定の場合を考慮し、`GetObjectInfo`、`GetThumb`、`GetObject` が `DeviceBusy` または `InvalidObjectHandle` を返した場合だけ、待機時間を延ばしながら最大6回再試行します。先に全ObjectInfoを読み、JPEG候補をRAWより先に処理します。サムネイルが公開されている場合は本体転送前に撮影プレビューへ渡します。
 
 v0.2.2ではOM独自プロパティを公開実装の形式に合わせて表示します。絞り `0xD002` は10倍値、シャッター `0xD01C` は上位16bitの分子／下位16bitの分母、露出補正 `0xD008` は符号付き16bitの1/1000 EVとして解釈します。ISOの `0xFFFF` / `0xFFFD` はAUTO / LOWとして扱います。
@@ -43,6 +45,8 @@ v0.2.2ではOM独自プロパティを公開実装の形式に合わせて表示
 v0.3.0では全ObjectInfoのstorage ID、ファイル名、形式、サイズを確認し、Androidで選択したJPEGまたはORFだけを転送します。同形式が複数ストレージにある場合は大きい候補から試し、最初に正常取得できた1件で終了します。JPEGが生成されていない場合に限り、RAWの `GetThumb` 結果またはOMD `GetImage` をプレビューJPEGとして保存し、フルJPEGではないことをUIと診断に明記します。これらはすべて読み取り命令で、カメラ側の画質・保存先・既存オブジェクトは変更しません。
 
 v0.3.1では露出表示の同期用に、取得済み記述子のデータ型を使って `GetDevicePropValue` を約1.8秒間隔で実行します。ライブビュー、撮影、露出変更と同じ直列化経路を通すため、PTPトランザクションを並行送信しません。DeviceInfoのプロパティ一覧にない場合も、既知のOM固有コードと標準PTPコードへ `GetDevicePropDesc` を安全に試し、正常応答があった項目だけを表示します。停止後の復旧時は古いUSB接続を閉じ、DeviceInfo取得とOpenSessionからやり直します。
+
+停止後のv0.3.2再接続では、libgphoto2のPTP2 USB復旧処理と同じStill Imageクラス固有DeviceReset要求 `bRequest=0x66` を対象インターフェースへ送ります。その後にDeviceInfo／OpenSessionをやり直し、LiveView mode `0xD06D` をUINT32の0へ解除してから `0x04000300` へ再設定します。DeviceResetを拒否するUSB実装では、LiveView modeの再設定だけをフォールバックとして続行します。
 
 ## コンテナと制限
 
@@ -65,6 +69,7 @@ PTP USBコンテナはlittle-endianで、`length:u32, type:u16, code:u16, transa
 
 - <https://github.com/gphoto/libgphoto2/blob/master/camlibs/ptp2/ptp.h>
 - <https://github.com/gphoto/libgphoto2/blob/master/camlibs/ptp2/library.c>
+- <https://github.com/gphoto/libgphoto2/blob/master/camlibs/ptp2/usb.c>
 - <https://github.com/gphoto/libgphoto2/blob/master/camlibs/ptp2/config.c>
 - <https://github.com/gphoto/libgphoto2/blob/master/NEWS>
 
