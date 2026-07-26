@@ -1,4 +1,4 @@
-# OM Tether for Android — USB-C prototype v0.3.1
+# OM Tether for Android — USB-C prototype v0.3.2
 
 OM SYSTEM OM‑1 Mark IIをAndroid端末からUSB-Cでテザー撮影するための、非公式の試作アプリです。撮影現場で必要になる表示・保存・画像確認を先に実装し、カメラ固有のUSB応答は診断ログで追える構成にしています。
 
@@ -7,7 +7,7 @@ OM SYSTEM OM‑1 Mark IIをAndroid端末からUSB-Cでテザー撮影するた�
 - USBホストからOM‑1 Mark II（VID `0x33A2` / PID `0x0136`）を検出し、AndroidのUSB許可を取得
 - PTPセッション、機種名・対応命令・対応プロパティの読み取り診断
 - OM‑D系USB命令によるライブビューJPEG取得
-- シャッター操作と、Androidへ保存する形式（JPEGまたはRAW）の選択
+- アプリ／カメラ本体どちらのシャッターでも撮影を検出し、Androidへ保存する形式（JPEGまたはRAW）を選択
 - カメラのカード1／カード2を横断したJPEG／ORFオブジェクト取得
 - Androidの `Pictures/OM Tether/yyyy-MM-dd` への自動保存
 - ライブビューのピンチ拡大、輝度ヒストグラム、白飛び警告オーバーレイ
@@ -15,6 +15,15 @@ OM SYSTEM OM‑1 Mark IIをAndroid端末からUSB-Cでテザー撮影するた�
 - カメラなしでUIとJPEG保存を確認できるデモモード
 - USBトランザクションとカメラ能力をコピーできる診断画面
 - 初回起動時の撮影前ガイド（端末設定、USB接続、グレーカード判定、表示微調整）
+
+## v0.3.2のPTPリセット・カメラ本体シャッター転送
+
+- ライブビュー停止後の再接続時に、USB Still ImageクラスのPTP DeviceReset要求 `0x66` を送信
+- 再接続時はライブビュー設定 `0xD06D` をいったん解除してから再設定し、カメラ内に残った停止状態を初期化
+- 標準／Olympus／OMのObjectAddedイベントを常時監視し、カメラ本体のシャッターボタンで作成された画像も自動転送
+- 割り込みイベントが届かない端末向けに、カード1／カード2の全ストレージ差分監視を併用
+- RAW＋JPEGが別カードへ作成される時間差をまとめてから、Androidで選択したJPEGまたはRAWを1件保存
+- 既存カード内容は接続時の基準として記録し、新規撮影だけを取り込む
 
 ## v0.3.1の再接続・露出同期・保存先・配色修正
 
@@ -90,8 +99,8 @@ OM SYSTEM OM‑1 Mark IIをAndroid端末からUSB-Cでテザー撮影するた�
 | デモのライブビュー／ヒストグラム／白飛び表示 | 実装済み、ソース検証済み |
 | JPEGのMediaStore保存 | 実装済み |
 | USB列挙・権限・PTPバルク通信 | 実機接続確認済み、継続検証中 |
-| OM‑1 Mark IIライブビュー | 実機で初回フレーム確認済み、USB/PTP全再接続を追加して再検証待ち |
-| JPEG／ORF選択取得 | 実装済み、カード1/2の振り分け別に実機確認が必要 |
+| OM‑1 Mark IIライブビュー | 実機で初回フレーム確認済み、PTP DeviceReset＋ライブビュー再初期化を追加して再検証待ち |
+| JPEG／ORF選択取得 | アプリ／本体シャッターに対応。カード1/2の振り分け別に実機確認が必要 |
 | 露出値の同期・変更 | 約1.8秒ごとの再読込とOM独自形式の表示変換を実装。書き込みはカメラが列挙する値だけ |
 | PEN E‑P7 | 対象外。公式OM Captureの対応機種一覧にも掲載なし |
 
@@ -121,7 +130,7 @@ OM SYSTEM OM‑1 Mark IIをAndroid端末からUSB-Cでテザー撮影するた�
 
 ### GitHub ActionsでAPKを作る
 
-`.github/workflows/build-apk.yml` を同梱しています。GitHubの `main` ブランチへ配置すると、ソース検証、JVM単体テスト、debug APK生成を自動実行します。成功時の成果物名は `OM-Tether-v0.3.1-debug` で、中に `app-debug.apk` が入ります。
+`.github/workflows/build-apk.yml` を同梱しています。GitHubの `main` ブランチへ配置すると、ソース検証、JVM単体テスト、debug APK生成を自動実行します。成功時の成果物名は `OM-Tether-v0.3.2-debug` で、中に `app-debug.apk` が入ります。
 
 このAPKは初期動作確認用のdebugビルドです。Google Play配布用のrelease署名APKではありません。
 
