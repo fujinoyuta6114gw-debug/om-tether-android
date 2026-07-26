@@ -15,6 +15,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.io.ByteArrayOutputStream
@@ -26,6 +27,7 @@ class MockCameraController : CameraController {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val mutableFrames = MutableSharedFlow<ByteArray>(extraBufferCapacity = 1)
     override val frames: Flow<ByteArray> = mutableFrames.asSharedFlow()
+    override val externalCaptureEvents: Flow<Unit> = emptyFlow()
     private val log = DiagnosticLog()
     private var liveViewJob: Job? = null
     private var frameNumber = 0
@@ -76,6 +78,12 @@ class MockCameraController : CameraController {
             },
         )
     }
+
+    override suspend fun importExternalCapture(
+        phoneSaveFormat: PhoneSaveFormat,
+        onPreview: suspend (ByteArray) -> Unit,
+        onObject: suspend (DownloadedObject) -> Unit,
+    ): CaptureReport = throw PtpException(message = "Demo camera has no physical shutter events")
 
     override suspend fun refreshExposureControls(): List<ExposureControl> = controls
 
