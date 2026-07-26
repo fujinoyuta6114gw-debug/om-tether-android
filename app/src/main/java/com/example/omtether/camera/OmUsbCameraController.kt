@@ -670,7 +670,7 @@ class OmUsbCameraController(
         usbInterface: UsbInterface,
     ) {
         val requestType =
-            UsbConstants.USB_DIR_OUT or UsbConstants.USB_TYPE_CLASS or UsbConstants.USB_RECIP_INTERFACE
+            UsbConstants.USB_DIR_OUT or UsbConstants.USB_TYPE_CLASS or USB_RECIPIENT_INTERFACE
         val result = activeConnection.controlTransfer(
             requestType,
             PTP_DEVICE_RESET_REQUEST,
@@ -1154,6 +1154,7 @@ class OmUsbCameraController(
 
     companion object {
         private const val PTP_DEVICE_RESET_REQUEST = 0x66
+        private const val USB_RECIPIENT_INTERFACE = 0x01
         private const val USB_CONTROL_TIMEOUT_MS = 2_000
         private const val PTP_RESET_SETTLE_MS = 300L
         private const val LIVE_VIEW_RESTART_SETTLE_MS = 180L
