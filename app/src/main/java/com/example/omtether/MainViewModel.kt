@@ -502,7 +502,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun diagnosticsText(): String = controller?.diagnosticsText()
-        ?: "OM Tether 0.3.2\nCamera controller is not active."
+        ?: "OM Tether 0.3.3\nCamera controller is not active."
 
     fun restartLiveView() {
         if (controller is MockCameraController) return
@@ -630,8 +630,26 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     statusMessage = if (demo) "デモモード — カメラへ命令は送信しません" else "OM‑1 Mark IIへ接続しています…",
                 )
             }
+            var connectionTimedOut = false
+            val connectionTimeoutJob = if (demo) {
+                null
+            } else {
+                viewModelScope.launch {
+                    delay(CONNECTION_TIMEOUT_MS)
+                    if (
+                        controller === newController &&
+                        mutableState.value.phase == ConnectionPhase.CONNECTING
+                    ) {
+                        connectionTimedOut = true
+                        // bulkTransfer is a blocking Android USB call. Closing the
+                        // UsbDeviceConnection releases it when PTP initialization stalls.
+                        newController.forceClose()
+                    }
+                }
+            }
             try {
                 val session = newController.connect()
+                connectionTimeoutJob?.cancel()
                 if (!demo) realCameraConnectedOnce = true
                 val generation = frameGeneration
                 frameCollectionJob = viewModelScope.launch {
@@ -697,6 +715,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     }
                 }
             } catch (error: CancellationException) {
+                connectionTimeoutJob?.cancel()
                 frameCollectionJob?.cancel()
                 frameCollectionJob = null
                 externalCaptureEventJob?.cancel()
@@ -707,6 +726,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 if (controller === newController) controller = null
                 throw error
             } catch (error: Throwable) {
+                connectionTimeoutJob?.cancel()
                 frameCollectionJob?.cancel()
                 frameCollectionJob = null
                 externalCaptureEventJob?.cancel()
@@ -730,7 +750,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         exposureControls = emptyList(),
                         exposureSyncActive = false,
                         liveViewIssue = null,
-                        statusMessage = "接続エラー: ${error.userMessage()}",
+                        statusMessage = if (connectionTimedOut) {
+                            "接続が30秒でタイムアウトしました。0 RAW/Controlを確認してUSBを接続し直してください"
+                        } else {
+                            "接続エラー: ${error.userMessage()}"
+                        },
                     )
                 }
             }
@@ -1080,6 +1104,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         private const val EXPOSURE_SYNC_INTERVAL_MS = 1_800L
         private const val EXTERNAL_CAPTURE_DEBOUNCE_MS = 650L
         private const val EXTERNAL_CAPTURE_BUSY_RETRY_MS = 250L
+        private const val CONNECTION_TIMEOUT_MS = 30_000L
         private const val CONTROLLER_SHUTDOWN_TIMEOUT_MS = 1_500L
         private const val USB_REOPEN_SETTLE_MS = 150L
         private const val LIVE_PREVIEW_MAX_DIMENSION = 1_024
