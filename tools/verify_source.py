@@ -43,6 +43,12 @@ def main() -> int:
     require('product-id="310"' in device_filter, "OM-1 Mark II USB product ID is missing")
 
     kotlin_source = "\n".join(path.read_text(encoding="utf-8") for path in APP_SOURCE.rglob("*.kt"))
+    camera_source = (
+        APP_SOURCE / "java" / "com" / "example" / "omtether" / "camera" / "OmUsbCameraController.kt"
+    ).read_text(encoding="utf-8")
+    connect_source = camera_source.split("override suspend fun connect(): CameraSession", 1)[1].split(
+        "override suspend fun startLiveView()", 1
+    )[0]
     setup_guide_source = (
         APP_SOURCE / "java" / "com" / "example" / "omtether" / "ui" / "SetupGuide.kt"
     ).read_text(encoding="utf-8")
@@ -88,6 +94,8 @@ def main() -> int:
         "camera-side shutter event flow": "externalCaptureEvents",
         "camera-side shutter import": "importExternalCapture",
         "dual-card new-object watcher": "Camera-side shutter watcher started",
+        "bounded initial USB connection": "CONNECTION_TIMEOUT_MS",
+        "live-view-first connection": "Initial card scan skipped so live view can start immediately",
     }
     for label, marker in required_markers.items():
         require(marker in kotlin_source, f"missing implementation marker: {label}")
@@ -108,6 +116,10 @@ def main() -> int:
     require(
         "frames.collectLatest" not in kotlin_source,
         "live-view analysis must not be cancelled by every newer frame",
+    )
+    require(
+        "GET_OBJECT_HANDLES" not in connect_source and "initializeObjectTracking" not in connect_source,
+        "connect() must not scan card 1/2 before the initial live view can start",
     )
 
     print(f"PASS: {len(xml_files)} XML files parsed")
