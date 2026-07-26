@@ -113,6 +113,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var analysisJob: Job? = null
     private var reviewJob: Job? = null
     private var captureJob: Job? = null
+    private var externalCaptureEventJob: Job? = null
+    private var externalCaptureDebounceJob: Job? = null
     private var lifecycleJob: Job? = null
     private var liveViewWatchdogJob: Job? = null
     private var exposureSyncJob: Job? = null
@@ -122,6 +124,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var lastFrameDecodedAt = 0L
     private var lastFrameAnalyzedAt = 0L
     private var appInForeground = true
+    private var recoverPtpAfterPermission = false
+    private var realCameraConnectedOnce = false
 
     private val usbReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
@@ -130,8 +134,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     val device = intent.usbDevice() ?: return
                     if (!isOm1MarkII(device)) return
                     if (intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false)) {
-                        connectUsb(device)
+                        val recoverPtpSession = recoverPtpAfterPermission
+                        recoverPtpAfterPermission = false
+                        connectUsb(device, recoverPtpSession)
                     } else {
+                        recoverPtpAfterPermission = false
                         mutableState.update {
                             it.copy(
                                 phase = ConnectionPhase.ERROR,
@@ -209,7 +216,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun capture() {
         val requestedController = controller ?: return
-        if (captureJob?.isActive == true) return
+        beginCaptureTransfer(requestedController, cameraSideShutter = false)
+    }
+
+    private fun beginCaptureTransfer(
+        requestedController: CameraController,
+        cameraSideShutter: Boolean,
+    ) {
+        if (captureJob?.isActive == true || mutableState.value.isCapturing) return
         val requestedSaveFormat = mutableState.value.phoneSaveFormat
         reviewJob?.cancel()
         mutableState.update {
@@ -219,9 +233,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 reviewHighlightOverlay = null,
                 reviewHistogram = IntArray(256),
                 reviewHighlightPercent = 0f,
-                statusMessage = when (requestedSaveFormat) {
-                    PhoneSaveFormat.JPEG -> "撮影してJPEGを保存しています…"
-                    PhoneSaveFormat.RAW -> "撮影してRAWを保存しています…"
+                statusMessage = when {
+                    cameraSideShutter && requestedSaveFormat == PhoneSaveFormat.JPEG ->
+                        "カメラ側の撮影を受信してJPEGを保存しています…"
+                    cameraSideShutter && requestedSaveFormat == PhoneSaveFormat.RAW ->
+                        "カメラ側の撮影を受信してRAWを保存しています…"
+                    requestedSaveFormat == PhoneSaveFormat.JPEG -> "撮影してJPEGを保存しています…"
+                    else -> "撮影してRAWを保存しています…"
                 },
             )
         }
@@ -235,27 +253,37 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 val saved = mutableListOf<SavedObject>()
                 val failures = mutableListOf<String>()
                 try {
-                    val report = requestedController.capture(
-                        phoneSaveFormat = requestedSaveFormat,
-                        onPreview = { jpeg ->
-                            if (controller === requestedController) showCaptureReview(jpeg)
-                        },
-                        onObject = { item ->
-                            try {
-                                val result = storage.saveOne(item)
-                                saved += result
-                                if (controller === requestedController) {
-                                    mutableState.update {
-                                        it.copy(statusMessage = "保存中: ${saved.joinToString { file -> file.filename }}")
-                                    }
+                    val onPreview: suspend (ByteArray) -> Unit = { jpeg ->
+                        if (controller === requestedController) showCaptureReview(jpeg)
+                    }
+                    val onObject: suspend (com.example.omtether.camera.DownloadedObject) -> Unit = { item ->
+                        try {
+                            val result = storage.saveOne(item)
+                            saved += result
+                            if (controller === requestedController) {
+                                mutableState.update {
+                                    it.copy(statusMessage = "保存中: ${saved.joinToString { file -> file.filename }}")
                                 }
-                            } catch (error: CancellationException) {
-                                throw error
-                            } catch (error: Throwable) {
-                                failures += "${item.filename}: ${error.userMessage()}"
                             }
-                        },
-                    )
+                        } catch (error: CancellationException) {
+                            throw error
+                        } catch (error: Throwable) {
+                            failures += "${item.filename}: ${error.userMessage()}"
+                        }
+                    }
+                    val report = if (cameraSideShutter) {
+                        requestedController.importExternalCapture(
+                            phoneSaveFormat = requestedSaveFormat,
+                            onPreview = onPreview,
+                            onObject = onObject,
+                        )
+                    } else {
+                        requestedController.capture(
+                            phoneSaveFormat = requestedSaveFormat,
+                            onPreview = onPreview,
+                            onObject = onObject,
+                        )
+                    }
                     failures += report.warnings
                     if (controller === requestedController) {
                         val status = when {
@@ -287,7 +315,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 } catch (error: Throwable) {
                     if (controller === requestedController) {
                         mutableState.update {
-                            it.copy(statusMessage = "撮影エラー: ${error.userMessage()}")
+                            it.copy(
+                                statusMessage = if (cameraSideShutter) {
+                                    "カメラ側撮影の受信エラー: ${error.userMessage()}"
+                                } else {
+                                    "撮影エラー: ${error.userMessage()}"
+                                },
+                            )
                         }
                     }
                 } finally {
@@ -468,7 +502,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun diagnosticsText(): String = controller?.diagnosticsText()
-        ?: "OM Tether 0.3.1\nCamera controller is not active."
+        ?: "OM Tether 0.3.2\nCamera controller is not active."
 
     fun restartLiveView() {
         if (controller is MockCameraController) return
@@ -491,14 +525,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 statusMessage = "USB/PTPセッションを作り直しています…",
             )
         }
-        requestUsbPermissionOrConnect(device)
+        requestUsbPermissionOrConnect(device, recoverPtpSession = true)
     }
 
-    private fun requestUsbPermissionOrConnect(device: UsbDevice) {
+    private fun requestUsbPermissionOrConnect(
+        device: UsbDevice,
+        recoverPtpSession: Boolean = false,
+    ) {
+        val shouldRecoverPtp = recoverPtpSession || realCameraConnectedOnce
         if (usbManager.hasPermission(device)) {
-            connectUsb(device)
+            connectUsb(device, shouldRecoverPtp)
             return
         }
+        recoverPtpAfterPermission = shouldRecoverPtp
         val permissionIntent = PendingIntent.getBroadcast(
             appContext,
             0,
@@ -514,10 +553,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         usbManager.requestPermission(device, permissionIntent)
     }
 
-    private fun connectUsb(device: UsbDevice) {
+    private fun connectUsb(device: UsbDevice, recoverPtpSession: Boolean = false) {
         lifecycleJob?.cancel()
         lifecycleJob = viewModelScope.launch {
-            activateController(OmUsbCameraController(usbManager, device), demo = false)
+            activateController(
+                OmUsbCameraController(
+                    usbManager = usbManager,
+                    device = device,
+                    recoverPtpSession = recoverPtpSession,
+                ),
+                demo = false,
+            )
         }
     }
 
@@ -541,6 +587,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             liveViewWatchdogJob?.cancel()
             exposureSyncJob?.cancel()
             exposureSyncJob = null
+            externalCaptureEventJob?.cancel()
+            externalCaptureEventJob = null
+            externalCaptureDebounceJob?.cancel()
+            externalCaptureDebounceJob = null
             frameCollectionJob?.cancel()
             frameCollectionJob = null
             analysisJob?.cancel()
@@ -582,6 +632,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
             try {
                 val session = newController.connect()
+                if (!demo) realCameraConnectedOnce = true
                 val generation = frameGeneration
                 frameCollectionJob = viewModelScope.launch {
                     // Decode one frame to completion and retain only the newest waiting frame.
@@ -590,6 +641,37 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         val announceFirstFrame = lastLiveFrameReceivedAt == 0L
                         lastLiveFrameReceivedAt = SystemClock.elapsedRealtime()
                         updateFrame(jpeg, generation, announceFirstFrame)
+                    }
+                }
+                if (!demo) {
+                    externalCaptureEventJob = viewModelScope.launch {
+                        newController.externalCaptureEvents.collect {
+                            if (
+                                controller !== newController ||
+                                generation != frameGeneration ||
+                                mutableState.value.phase == ConnectionPhase.ERROR
+                            ) {
+                                return@collect
+                            }
+                            externalCaptureDebounceJob?.cancel()
+                            externalCaptureDebounceJob = viewModelScope.launch {
+                                delay(EXTERNAL_CAPTURE_DEBOUNCE_MS)
+                                while (
+                                    controller === newController &&
+                                    generation == frameGeneration &&
+                                    mutableState.value.isCapturing
+                                ) {
+                                    delay(EXTERNAL_CAPTURE_BUSY_RETRY_MS)
+                                }
+                                if (
+                                    controller === newController &&
+                                    generation == frameGeneration &&
+                                    mutableState.value.phase == ConnectionPhase.CONNECTED
+                                ) {
+                                    beginCaptureTransfer(newController, cameraSideShutter = true)
+                                }
+                            }
+                        }
                     }
                 }
                 mutableState.update {
@@ -616,12 +698,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             } catch (error: CancellationException) {
                 frameCollectionJob?.cancel()
                 frameCollectionJob = null
+                externalCaptureEventJob?.cancel()
+                externalCaptureEventJob = null
+                externalCaptureDebounceJob?.cancel()
+                externalCaptureDebounceJob = null
                 newController.forceClose()
                 if (controller === newController) controller = null
                 throw error
             } catch (error: Throwable) {
                 frameCollectionJob?.cancel()
                 frameCollectionJob = null
+                externalCaptureEventJob?.cancel()
+                externalCaptureEventJob = null
+                externalCaptureDebounceJob?.cancel()
+                externalCaptureDebounceJob = null
                 newController.forceClose()
                 if (controller === newController) controller = null
                 mutableState.update {
@@ -901,6 +991,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         liveViewWatchdogJob?.cancel()
         exposureSyncJob?.cancel()
         exposureSyncJob = null
+        externalCaptureEventJob?.cancel()
+        externalCaptureEventJob = null
+        externalCaptureDebounceJob?.cancel()
+        externalCaptureDebounceJob = null
         captureJob?.cancel()
         captureJob = null
         lifecycleJob?.cancel()
@@ -947,6 +1041,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         lifecycleJob?.cancel()
         liveViewWatchdogJob?.cancel()
         exposureSyncJob?.cancel()
+        externalCaptureEventJob?.cancel()
+        externalCaptureDebounceJob?.cancel()
         controller?.forceClose()
         super.onCleared()
     }
@@ -981,6 +1077,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         private const val LIVE_VIEW_WATCHDOG_INTERVAL_MS = 1_000L
         private const val LIVE_VIEW_STALL_TIMEOUT_MS = 4_000L
         private const val EXPOSURE_SYNC_INTERVAL_MS = 1_800L
+        private const val EXTERNAL_CAPTURE_DEBOUNCE_MS = 650L
+        private const val EXTERNAL_CAPTURE_BUSY_RETRY_MS = 250L
         private const val CONTROLLER_SHUTDOWN_TIMEOUT_MS = 1_500L
         private const val USB_REOPEN_SETTLE_MS = 150L
         private const val LIVE_PREVIEW_MAX_DIMENSION = 1_024
