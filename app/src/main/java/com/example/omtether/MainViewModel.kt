@@ -649,7 +649,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             if (
                                 controller !== newController ||
                                 generation != frameGeneration ||
-                                mutableState.value.phase == ConnectionPhase.ERROR
+                                mutableState.value.phase == ConnectionPhase.ERROR ||
+                                mutableState.value.isCapturing
                             ) {
                                 return@collect
                             }
