@@ -5,11 +5,17 @@ import java.util.Locale
 
 interface CameraController {
     val frames: Flow<ByteArray>
+    val externalCaptureEvents: Flow<Unit>
 
     suspend fun connect(): CameraSession
     suspend fun startLiveView()
     suspend fun stopLiveView()
     suspend fun capture(
+        phoneSaveFormat: PhoneSaveFormat,
+        onPreview: suspend (ByteArray) -> Unit,
+        onObject: suspend (DownloadedObject) -> Unit,
+    ): CaptureReport
+    suspend fun importExternalCapture(
         phoneSaveFormat: PhoneSaveFormat,
         onPreview: suspend (ByteArray) -> Unit,
         onObject: suspend (DownloadedObject) -> Unit,
