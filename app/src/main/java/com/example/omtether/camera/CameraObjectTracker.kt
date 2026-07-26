@@ -1,0 +1,72 @@
+package com.example.omtether.camera
+
+/**
+ * Tracks PTP object handles across both card slots.
+ *
+ * A camera-side shutter can be reported by the interrupt endpoint, by storage polling,
+ * or by both. This class de-duplicates those paths and retains a short pending batch so
+ * RAW/JPEG companions can be imported together before the Android save policy selects one.
+ */
+internal class CameraObjectTracker {
+    private val known = linkedSetOf<Long>()
+    private val pending = linkedSetOf<Long>()
+    private var initialized = false
+
+    @Synchronized
+    fun initialize(handles: Iterable<Long>) {
+        known.clear()
+        known += handles.filter(::isUsableHandle)
+        pending.clear()
+        initialized = true
+    }
+
+    /**
+     * Records an interrupt-endpoint ObjectAdded notification.
+     *
+     * The pending item is retained even if the first full storage snapshot has not yet
+     * completed; that first snapshot then becomes the baseline without losing the event.
+     */
+    @Synchronized
+    fun recordEvent(handle: Long, queueForImport: Boolean): Boolean {
+        if (!isUsableHandle(handle)) return false
+        val isNew = known.add(handle)
+        return isNew && queueForImport && pending.add(handle)
+    }
+
+    /**
+     * Observes the union of card 1/card 2 handles. The first successful snapshot is only a
+     * baseline, preventing existing card contents from being imported on app launch.
+     */
+    @Synchronized
+    fun observeSnapshot(handles: Iterable<Long>, queueForImport: Boolean): Boolean {
+        val usable = handles.filter(::isUsableHandle)
+        if (!initialized) {
+            known += usable
+            initialized = true
+            return false
+        }
+        var queued = false
+        usable.forEach { handle ->
+            if (known.add(handle) && queueForImport) {
+                queued = pending.add(handle) || queued
+            }
+        }
+        return queued
+    }
+
+    @Synchronized
+    fun markKnown(handles: Iterable<Long>) {
+        known += handles.filter(::isUsableHandle)
+    }
+
+    @Synchronized
+    fun pendingCount(): Int = pending.size
+
+    @Synchronized
+    fun takePending(): List<Long> = pending.toList().also { pending.clear() }
+
+    companion object {
+        private fun isUsableHandle(handle: Long): Boolean =
+            handle != 0L && handle != 0xFFFF_FFFFL
+    }
+}
