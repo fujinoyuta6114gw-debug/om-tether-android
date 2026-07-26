@@ -44,4 +44,27 @@ class CameraObjectTrackerTest {
         assertFalse(tracker.observeSnapshot(listOf(1L, 2L, 31L), queueForImport = true))
         assertEquals(listOf(31L), tracker.takePending())
     }
+
+    @Test
+    fun companionBesidePreBaselineEventIsRetainedAcrossSecondCard() {
+        val tracker = CameraObjectTracker()
+
+        assertTrue(tracker.recordEvent(101L, queueForImport = true))
+        assertTrue(
+            tracker.observeSnapshot(
+                listOf(1L, 2L, 101L, 102L, 900L),
+                queueForImport = true,
+            ),
+        )
+        assertEquals(listOf(101L, 102L), tracker.takePending())
+    }
+
+    @Test
+    fun distantExistingObjectsAreNotQueuedAroundPreBaselineEvent() {
+        val tracker = CameraObjectTracker()
+
+        assertTrue(tracker.recordEvent(501L, queueForImport = true))
+        tracker.observeSnapshot(listOf(10L, 20L, 501L, 900L), queueForImport = true)
+        assertEquals(listOf(501L), tracker.takePending())
+    }
 }

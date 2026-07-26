@@ -71,6 +71,32 @@ object CaptureSavePolicy {
         )
         .toList()
 
+    /**
+     * Keeps objects belonging to the same shutter release as the first handle.
+     *
+     * A pre-baseline interrupt can require inspecting a few numerically adjacent handles
+     * to find the RAW/JPEG companion on the other card. Filtering by the common filename
+     * stem first, then by the PTP capture timestamp, prevents an adjacent older image from
+     * winning the size-based save selection.
+     */
+    fun coherentCaptureBatch(candidates: List<PtpObjectInfo>): List<PtpObjectInfo> {
+        if (candidates.size < 2) return candidates
+        val anchor = candidates.first()
+        val anchorStem = filenameStem(anchor.filename)
+        if (anchorStem.isNotBlank()) {
+            val sameStem = candidates.filter { filenameStem(it.filename).equals(anchorStem, ignoreCase = true) }
+            if (sameStem.size > 1) return sameStem
+        }
+        if (anchor.captureDate.isNotBlank()) {
+            val sameCaptureDate = candidates.filter { it.captureDate == anchor.captureDate }
+            if (sameCaptureDate.size > 1) return sameCaptureDate
+        }
+        return candidates
+    }
+
+    private fun filenameStem(filename: String): String =
+        filename.substringBeforeLast('.', filename).trim()
+
     const val JPEG_OBJECT_FORMAT = 0x3801
 }
 

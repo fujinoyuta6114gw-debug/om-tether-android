@@ -68,11 +68,65 @@ class CaptureSavePolicyTest {
         assertSame(raw, CaptureSavePolicy.selectPreferred(PhoneSaveFormat.RAW, listOf(raw)))
     }
 
+    @Test
+    fun `coherent batch keeps dual-card companions and drops adjacent older image`() {
+        val eventRaw = objectInfo(
+            storageId = 0x0001_0001L,
+            filename = "P7260100.ORF",
+            format = 0x3000,
+            size = 24_000_000L,
+            captureDate = "20260726T120001",
+        )
+        val olderJpeg = objectInfo(
+            storageId = 0x0002_0001L,
+            filename = "P7260099.JPG",
+            format = CaptureSavePolicy.JPEG_OBJECT_FORMAT,
+            size = 12_000_000L,
+            captureDate = "20260726T115959",
+        )
+        val companionJpeg = objectInfo(
+            storageId = 0x0002_0001L,
+            filename = "P7260100.JPG",
+            format = CaptureSavePolicy.JPEG_OBJECT_FORMAT,
+            size = 8_000_000L,
+            captureDate = "20260726T120001",
+        )
+
+        assertEquals(
+            listOf(eventRaw, companionJpeg),
+            CaptureSavePolicy.coherentCaptureBatch(listOf(eventRaw, olderJpeg, companionJpeg)),
+        )
+    }
+
+    @Test
+    fun `coherent batch can pair different card names by capture timestamp`() {
+        val eventRaw = objectInfo(
+            storageId = 0x0001_0001L,
+            filename = "RAW0101.ORF",
+            format = 0x3000,
+            size = 24_000_000L,
+            captureDate = "20260726T120002",
+        )
+        val companionJpeg = objectInfo(
+            storageId = 0x0002_0001L,
+            filename = "JPEG7777.JPG",
+            format = CaptureSavePolicy.JPEG_OBJECT_FORMAT,
+            size = 8_000_000L,
+            captureDate = "20260726T120002",
+        )
+
+        assertEquals(
+            listOf(eventRaw, companionJpeg),
+            CaptureSavePolicy.coherentCaptureBatch(listOf(eventRaw, companionJpeg)),
+        )
+    }
+
     private fun objectInfo(
         storageId: Long,
         filename: String,
         format: Int,
         size: Long,
+        captureDate: String = "20260726T120000",
     ) = PtpObjectInfo(
         storageId = storageId,
         format = format,
@@ -82,6 +136,6 @@ class CaptureSavePolicyTest {
         imageWidth = 5_184L,
         imageHeight = 3_888L,
         filename = filename,
-        captureDate = "20260726T120000",
+        captureDate = captureDate,
     )
 }

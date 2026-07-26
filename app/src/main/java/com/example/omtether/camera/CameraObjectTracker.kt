@@ -10,6 +10,7 @@ package com.example.omtether.camera
 internal class CameraObjectTracker {
     private val known = linkedSetOf<Long>()
     private val pending = linkedSetOf<Long>()
+    private val preBaselineEvents = linkedSetOf<Long>()
     private var initialized = false
 
     @Synchronized
@@ -17,6 +18,7 @@ internal class CameraObjectTracker {
         known.clear()
         known += handles.filter(::isUsableHandle)
         pending.clear()
+        preBaselineEvents.clear()
         initialized = true
     }
 
@@ -30,6 +32,7 @@ internal class CameraObjectTracker {
     fun recordEvent(handle: Long, queueForImport: Boolean): Boolean {
         if (!isUsableHandle(handle)) return false
         val isNew = known.add(handle)
+        if (isNew && queueForImport && !initialized) preBaselineEvents += handle
         return isNew && queueForImport && pending.add(handle)
     }
 
@@ -41,9 +44,26 @@ internal class CameraObjectTracker {
     fun observeSnapshot(handles: Iterable<Long>, queueForImport: Boolean): Boolean {
         val usable = handles.filter(::isUsableHandle)
         if (!initialized) {
+            var queued = false
+            if (queueForImport && preBaselineEvents.isNotEmpty()) {
+                // PTP object handles created by one shutter release are normally adjacent.
+                // Keep only a very small neighborhood around a real ObjectAdded event; the
+                // transfer layer then verifies filename stem/capture time before selecting
+                // RAW or JPEG. This recovers a card-2 companion without importing the card's
+                // pre-existing contents as the initial baseline.
+                usable.forEach { candidate ->
+                    val nearEvent = preBaselineEvents.any { event ->
+                        unsignedHandleDistance(candidate, event) <= PRE_BASELINE_COMPANION_DISTANCE
+                    }
+                    if (nearEvent && known.add(candidate)) {
+                        queued = pending.add(candidate) || queued
+                    }
+                }
+            }
             known += usable
+            preBaselineEvents.clear()
             initialized = true
-            return false
+            return queued
         }
         var queued = false
         usable.forEach { handle ->
@@ -66,7 +86,15 @@ internal class CameraObjectTracker {
     fun takePending(): List<Long> = pending.toList().also { pending.clear() }
 
     companion object {
+        private const val PRE_BASELINE_COMPANION_DISTANCE = 3L
+
         private fun isUsableHandle(handle: Long): Boolean =
             handle != 0L && handle != 0xFFFF_FFFFL
+
+        private fun unsignedHandleDistance(first: Long, second: Long): Long {
+            val a = first and 0xFFFF_FFFFL
+            val b = second and 0xFFFF_FFFFL
+            return if (a >= b) a - b else b - a
+        }
     }
 }

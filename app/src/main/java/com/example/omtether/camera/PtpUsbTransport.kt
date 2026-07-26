@@ -42,19 +42,21 @@ class PtpUsbTransport(
         outgoingData: ByteArray? = null,
         acceptedResponses: Set<Int> = setOf(Ptp.RESPONSE_OK),
         transactionIdOverride: Long? = null,
+        transferTimeoutMs: Int = DEFAULT_TRANSFER_TIMEOUT_MS,
     ): PtpResult = transactionMutex.withLock {
+        require(transferTimeoutMs > 0) { "transferTimeoutMs must be positive" }
         withContext(Dispatchers.IO) {
             val transactionId = transactionIdOverride ?: (nextTransactionId++ and 0xFFFF_FFFFL)
             log.add("> ${Ptp.hex16(code)} tx=$transactionId params=${parameters.joinToString { Ptp.hex32(it) }}")
-            writeFully(PtpCodec.command(code, transactionId, parameters))
+            writeFully(PtpCodec.command(code, transactionId, parameters), transferTimeoutMs)
             if (outgoingData != null) {
                 log.add("> data ${Ptp.hex16(code)} ${outgoingData.size} B")
-                writeFully(PtpCodec.data(code, transactionId, outgoingData))
+                writeFully(PtpCodec.data(code, transactionId, outgoingData), transferTimeoutMs)
             }
 
             var incomingData: ByteArray? = null
             repeat(MAX_CONTAINERS_PER_TRANSACTION) {
-                val container = readContainer()
+                val container = readContainer(transferTimeoutMs)
                 if (container.type == Ptp.CONTAINER_EVENT) {
                     log.add("! event ${Ptp.hex16(container.code)} params=${container.payload.size / 4}")
                     return@repeat
@@ -100,7 +102,7 @@ class PtpUsbTransport(
         }
     }
 
-    private fun writeFully(bytes: ByteArray) {
+    private fun writeFully(bytes: ByteArray, transferTimeoutMs: Int) {
         var offset = 0
         while (offset < bytes.size) {
             val transferred = connection.bulkTransfer(
@@ -108,7 +110,7 @@ class PtpUsbTransport(
                 bytes,
                 offset,
                 bytes.size - offset,
-                WRITE_TIMEOUT_MS,
+                transferTimeoutMs,
             )
             if (transferred <= 0) {
                 throw PtpException(message = "USB bulk OUT timed out at $offset/${bytes.size}")
@@ -117,8 +119,8 @@ class PtpUsbTransport(
         }
     }
 
-    private fun readContainer(): PtpContainer {
-        while (pending.size < 12) pending += readChunk(READ_CHUNK_BYTES)
+    private fun readContainer(transferTimeoutMs: Int): PtpContainer {
+        while (pending.size < 12) pending += readChunk(READ_CHUNK_BYTES, transferTimeoutMs)
         val length = try {
             PtpCodec.declaredLength(pending)
         } catch (error: IllegalArgumentException) {
@@ -148,7 +150,10 @@ class PtpUsbTransport(
 
         var offset = fromPending
         while (offset < payloadLength) {
-            val chunk = readChunk(min(READ_CHUNK_BYTES, payloadLength - offset))
+            val chunk = readChunk(
+                min(READ_CHUNK_BYTES, payloadLength - offset),
+                transferTimeoutMs,
+            )
             val usable = min(chunk.size, payloadLength - offset)
             chunk.copyInto(payload, destinationOffset = offset, endIndex = usable)
             offset += usable
@@ -157,14 +162,14 @@ class PtpUsbTransport(
         return PtpContainer(type, code, transactionId, payload)
     }
 
-    private fun readChunk(requestedBytes: Int): ByteArray {
+    private fun readChunk(requestedBytes: Int, transferTimeoutMs: Int): ByteArray {
         val buffer = ByteArray(requestedBytes)
         repeat(MAX_ZERO_LENGTH_READS + 1) { attempt ->
             val transferred = connection.bulkTransfer(
                 bulkIn,
                 buffer,
                 requestedBytes,
-                READ_TIMEOUT_MS,
+                transferTimeoutMs,
             )
             if (transferred < 0) {
                 throw PtpException(message = "USB bulk IN timed out (requested $requestedBytes B)")
@@ -181,9 +186,8 @@ class PtpUsbTransport(
     }
 
     companion object {
+        const val DEFAULT_TRANSFER_TIMEOUT_MS = 20_000
         private const val READ_CHUNK_BYTES = 64 * 1024
-        private const val READ_TIMEOUT_MS = 20_000
-        private const val WRITE_TIMEOUT_MS = 20_000
         private const val MAX_CONTAINERS_PER_TRANSACTION = 24
         private const val MAX_ZERO_LENGTH_READS = 4
     }

@@ -93,9 +93,13 @@ def main() -> int:
         "forced live-view restart": "Live-view property cleared for recovery",
         "camera-side shutter event flow": "externalCaptureEvents",
         "camera-side shutter import": "importExternalCapture",
-        "dual-card new-object watcher": "Camera-side shutter watcher started",
+        "dual-card new-object watcher": "Camera-side shutter safety polling started after first live-view frame",
         "bounded initial USB connection": "CONNECTION_TIMEOUT_MS",
-        "live-view-first connection": "Initial card scan skipped so live view can start immediately",
+        "first decoded frame connection gate": "firstFrameReady.await()",
+        "deferred exposure and card setup": "Exposure/card initialization deferred until after the first live-view frame",
+        "bounded card safety polling": "OBJECT_WATCH_TRANSFER_TIMEOUT_MS",
+        "pre-baseline companion grouping": "coherentCaptureBatch",
+        "retained failure diagnostics": "lastDiagnosticsText",
     }
     for label, marker in required_markers.items():
         require(marker in kotlin_source, f"missing implementation marker: {label}")
@@ -120,6 +124,10 @@ def main() -> int:
     require(
         "GET_OBJECT_HANDLES" not in connect_source and "initializeObjectTracking" not in connect_source,
         "connect() must not scan card 1/2 before the initial live view can start",
+    )
+    require(
+        "readExposureControls()" not in connect_source,
+        "connect() must not read exposure descriptors before the initial live view can start",
     )
 
     print(f"PASS: {len(xml_files)} XML files parsed")

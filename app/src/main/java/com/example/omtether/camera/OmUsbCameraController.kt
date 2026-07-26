@@ -55,10 +55,13 @@ class OmUsbCameraController(
     private val objectTracker = CameraObjectTracker()
     private val descriptors = mutableMapOf<Int, PtpPropertyDescriptor>()
     private val cameraOperationMutex = Mutex()
+    private var exposureDescriptorsInitialized = false
     @Volatile
     private var appCaptureActive = false
     @Volatile
     private var externalImportActive = false
+    @Volatile
+    private var firstLiveViewFrameSeen = false
     private var forceLiveViewRestart = recoverPtpSession
 
     override suspend fun connect(): CameraSession {
@@ -108,13 +111,11 @@ class OmUsbCameraController(
             sessionOpen = true
 
             initializePcMode(info)
-            val controls = readExposureControls()
-            // Do not scan every object on card 1/2 before returning from connect().
-            // Some OM bodies keep GetObjectHandles pending while entering PC/live-view
-            // mode, which used to leave the UI at "connecting" indefinitely. Prefer the
-            // interrupt endpoint and use storage polling only when that path is absent.
-            endpointSet.interruptIn?.let(::startEventReader) ?: startObjectWatcher()
-            log.add("Initial card scan skipped so live view can start immediately")
+            // Exposure descriptors and the first card baseline are intentionally deferred.
+            // Both can be slow on an OM body while it is entering PC mode. The first
+            // decodable live-view frame is delivered before either background task starts.
+            endpointSet.interruptIn?.let(::startEventReader)
+            log.add("Exposure/card initialization deferred until after the first live-view frame")
             return CameraSession(
                 identity = CameraIdentity(
                     manufacturer = info.manufacturer,
@@ -123,7 +124,7 @@ class OmUsbCameraController(
                     usbVendorId = device.vendorId,
                     usbProductId = device.productId,
                 ),
-                exposureControls = controls,
+                exposureControls = emptyList(),
             )
         } catch (error: Throwable) {
             log.add("Connect failed: ${error.message}")
@@ -148,10 +149,16 @@ class OmUsbCameraController(
                     val payload = requiredTransport().execute(
                         Ptp.OMD_GET_LIVE_VIEW_IMAGE,
                         parameters = listOf(1L),
+                        transferTimeoutMs = LIVE_VIEW_TRANSFER_TIMEOUT_MS,
                     ).data
                     val jpeg = payload?.let(::extractJpeg)
                     if (jpeg != null && jpeg.size >= 1024) {
                         mutableFrames.emit(jpeg)
+                        if (!firstLiveViewFrameSeen) {
+                            firstLiveViewFrameSeen = true
+                            log.add("First decodable live-view frame received; starting card 1/2 baseline")
+                            startObjectWatcher()
+                        }
                         consecutiveErrors = 0
                     } else {
                         log.add("Live view returned no decodable JPEG")
@@ -203,7 +210,7 @@ class OmUsbCameraController(
         try {
             drainObjectEvents()
             val baseline = try {
-                getAllObjectHandles().toSet()
+                getAllObjectHandles(CAPTURE_HANDLE_SCAN_TIMEOUT_MS).toSet()
             } catch (error: Throwable) {
                 log.add("Could not take pre-capture object snapshot: ${error.message}")
                 null
@@ -283,7 +290,7 @@ class OmUsbCameraController(
         var previousPendingCount = objectTracker.pendingCount()
         while (SystemClock.elapsedRealtime() - started < EXTERNAL_CAPTURE_MAX_WAIT_MS) {
             delay(EXTERNAL_CAPTURE_POLL_INTERVAL_MS)
-            runCatching { getAllObjectHandles() }
+            runCatching { getAllObjectHandles(EXTERNAL_CAPTURE_SCAN_TIMEOUT_MS) }
                 .onSuccess { handles ->
                     objectTracker.observeSnapshot(handles, queueForImport = true)
                 }
@@ -359,18 +366,28 @@ class OmUsbCameraController(
             }
         }
 
+        val coherentInfos = CaptureSavePolicy.coherentCaptureBatch(candidates.map(ObjectCandidate::info))
+        val selectionCandidates = coherentInfos.mapNotNull { chosen ->
+            candidates.firstOrNull { candidate -> candidate.info === chosen }
+        }
+        if (selectionCandidates.size < candidates.size) {
+            log.add(
+                "$sourceLabel ignored ${candidates.size - selectionCandidates.size} adjacent object(s) " +
+                    "whose filename/time did not match the shutter event",
+            )
+        }
         log.add(
             "$sourceLabel phone save=${phoneSaveFormat.name}; candidates=" +
-                candidates.joinToString { candidate ->
+                selectionCandidates.joinToString { candidate ->
                     "${candidate.displayName}@${Ptp.hex32(candidate.info.storageId)}"
                 }.ifBlank { "none" },
         )
 
         fun orderedCandidates(format: PhoneSaveFormat): List<ObjectCandidate> {
             return CaptureSavePolicy
-                .orderedPreferred(format, candidates.map(ObjectCandidate::info))
+                .orderedPreferred(format, selectionCandidates.map(ObjectCandidate::info))
                 .mapNotNull { chosen ->
-                    candidates.firstOrNull { candidate -> candidate.info === chosen }
+                    selectionCandidates.firstOrNull { candidate -> candidate.info === chosen }
                 }
         }
 
@@ -483,11 +500,20 @@ class OmUsbCameraController(
 
     override suspend fun refreshExposureControls(): List<ExposureControl> =
         cameraOperationMutex.withLock {
+            if (!exposureDescriptorsInitialized) {
+                return@withLock readExposureControls()
+            }
             ExposureFormatter.definitions.mapNotNull { definition ->
                 val code = definition.candidates.firstOrNull(descriptors::containsKey)
                     ?: return@mapNotNull null
                 val previous = descriptors.getValue(code)
-                val current = runCatching { getPropertyValue(code, previous.dataType) }
+                val current = runCatching {
+                    getPropertyValue(
+                        code = code,
+                        dataType = previous.dataType,
+                        transferTimeoutMs = EXPOSURE_PROPERTY_TRANSFER_TIMEOUT_MS,
+                    )
+                }
                     .onFailure {
                         log.add("Property ${Ptp.hex16(code)} value refresh failed: ${it.message}")
                     }
@@ -553,7 +579,7 @@ class OmUsbCameraController(
     }
 
     override fun diagnosticsText(): String = buildString {
-        appendLine("OM Tether 0.3.3")
+        appendLine("OM Tether 0.3.4")
         appendLine("USB: VID=${Ptp.hex16(device.vendorId)} PID=${Ptp.hex16(device.productId)} name=${device.deviceName}")
         deviceInfo?.let { info ->
             appendLine("Camera: ${info.manufacturer} ${info.model}")
@@ -735,11 +761,13 @@ class OmUsbCameraController(
     private suspend fun readExposureControls(): List<ExposureControl> {
         val supported = deviceInfo?.properties.orEmpty()
         descriptors.clear()
-        return ExposureFormatter.definitions.mapNotNull { definition ->
+        val controls = ExposureFormatter.definitions.mapNotNull { definition ->
             definition.candidates
                 .sortedByDescending(supported::contains)
                 .firstNotNullOfOrNull { code ->
-                    val descriptor = runCatching { getDescriptor(code) }
+                    val descriptor = runCatching {
+                        getDescriptor(code, EXPOSURE_PROPERTY_TRANSFER_TIMEOUT_MS)
+                    }
                         .onFailure {
                             if (code in supported) {
                                 log.add("Property ${Ptp.hex16(code)} descriptor failed: ${it.message}")
@@ -750,20 +778,31 @@ class OmUsbCameraController(
                     ExposureFormatter.toControl(definition.title, descriptor)
                 }
         }
+        exposureDescriptorsInitialized = true
+        return controls
     }
 
-    private suspend fun getPropertyValue(code: Int, dataType: Int): PtpScalar {
+    private suspend fun getPropertyValue(
+        code: Int,
+        dataType: Int,
+        transferTimeoutMs: Int = PtpUsbTransport.DEFAULT_TRANSFER_TIMEOUT_MS,
+    ): PtpScalar {
         val bytes = requiredTransport().execute(
             Ptp.GET_DEVICE_PROP_VALUE,
             parameters = listOf(code.toLong()),
+            transferTimeoutMs = transferTimeoutMs,
         ).data ?: throw PtpException(message = "Property value ${Ptp.hex16(code)} has no data")
         return PtpCursor(bytes).scalar(dataType)
     }
 
-    private suspend fun getDescriptor(code: Int): PtpPropertyDescriptor {
+    private suspend fun getDescriptor(
+        code: Int,
+        transferTimeoutMs: Int = PtpUsbTransport.DEFAULT_TRANSFER_TIMEOUT_MS,
+    ): PtpPropertyDescriptor {
         val bytes = requiredTransport().execute(
             Ptp.GET_DEVICE_PROP_DESC,
             parameters = listOf(code.toLong()),
+            transferTimeoutMs = transferTimeoutMs,
         ).data ?: throw PtpException(message = "Property descriptor ${Ptp.hex16(code)} has no data")
         return PtpDatasetParser.propertyDescriptor(bytes).also { descriptor ->
             log.add(
@@ -787,23 +826,32 @@ class OmUsbCameraController(
         }
     }
 
-    private suspend fun getAllObjectHandles(): List<Long> {
+    private suspend fun getAllObjectHandles(
+        transferTimeoutMs: Int = PtpUsbTransport.DEFAULT_TRANSFER_TIMEOUT_MS,
+    ): List<Long> {
         val data = requiredTransport().execute(
             Ptp.GET_OBJECT_HANDLES,
             parameters = listOf(0xFFFF_FFFFL, 0L, 0L),
+            transferTimeoutMs = transferTimeoutMs,
         ).data ?: throw PtpException(message = "GetObjectHandles returned no data")
         return PtpDatasetParser.objectHandles(data)
     }
 
     private fun startObjectWatcher() {
+        if (!firstLiveViewFrameSeen) {
+            log.add("Card 1/2 polling deferred until a live-view frame is available")
+            return
+        }
         if (objectWatcherJob?.isActive == true) return
         objectWatcherJob = scope.launch {
+            var firstPass = true
             while (isActive) {
-                delay(OBJECT_WATCH_INTERVAL_MS)
+                if (!firstPass) delay(OBJECT_WATCH_INTERVAL_MS)
+                firstPass = false
                 if (!sessionOpen) continue
                 try {
                     val shouldNotify = cameraOperationMutex.withLock {
-                        val handles = getAllObjectHandles()
+                        val handles = getAllObjectHandles(OBJECT_WATCH_TRANSFER_TIMEOUT_MS)
                         objectTracker.observeSnapshot(
                             handles = handles,
                             queueForImport = !appCaptureActive,
@@ -820,7 +868,7 @@ class OmUsbCameraController(
                 }
             }
         }
-        log.add("Camera-side shutter watcher started")
+        log.add("Camera-side shutter safety polling started after first live-view frame")
     }
 
     private suspend fun waitForNewHandles(baseline: Set<Long>?): List<Long> {
@@ -837,7 +885,7 @@ class OmUsbCameraController(
             val now = SystemClock.elapsedRealtime()
             if (baseline != null && now - lastStoragePollAt >= STORAGE_POLL_INTERVAL_MS) {
                 lastStoragePollAt = now
-                val current = runCatching { getAllObjectHandles() }
+                val current = runCatching { getAllObjectHandles(CAPTURE_HANDLE_SCAN_TIMEOUT_MS) }
                     .onFailure { log.add("Object poll failed: ${it.message}") }
                     .getOrNull()
                 if (current != null) found += current.filterNot(baseline::contains)
@@ -857,7 +905,7 @@ class OmUsbCameraController(
         eventReaderJob = scope.launch {
             val request = UsbRequest()
             if (!request.initialize(activeConnection, endpoint)) {
-                log.add("Interrupt endpoint could not be initialized; starting card 1/2 polling")
+                log.add("Interrupt endpoint could not be initialized; safety polling remains armed")
                 request.close()
                 startObjectWatcher()
                 return@launch
@@ -908,7 +956,7 @@ class OmUsbCameraController(
                     connection === activeConnection &&
                     coroutineContext.isActive
                 ) {
-                    log.add("Interrupt event reader ended; starting card 1/2 polling")
+                    log.add("Interrupt event reader ended; card 1/2 safety polling remains active")
                     startObjectWatcher()
                 }
             }
@@ -1169,11 +1217,16 @@ class OmUsbCameraController(
         private const val USB_CONTROL_TIMEOUT_MS = 2_000
         private const val PTP_RESET_SETTLE_MS = 300L
         private const val LIVE_VIEW_RESTART_SETTLE_MS = 180L
+        private const val LIVE_VIEW_TRANSFER_TIMEOUT_MS = 3_000
         private const val CAPTURE_TIMEOUT_MS = 12_000L
         private const val COMPANION_OBJECT_WAIT_MS = 2_500L
         private const val STORAGE_POLL_INTERVAL_MS = 700L
-        private const val OBJECT_WATCH_INTERVAL_MS = 1_200L
+        private const val CAPTURE_HANDLE_SCAN_TIMEOUT_MS = 4_000
+        private const val EXPOSURE_PROPERTY_TRANSFER_TIMEOUT_MS = 1_200
+        private const val OBJECT_WATCH_INTERVAL_MS = 2_000L
+        private const val OBJECT_WATCH_TRANSFER_TIMEOUT_MS = 1_500
         private const val EXTERNAL_CAPTURE_POLL_INTERVAL_MS = 250L
+        private const val EXTERNAL_CAPTURE_SCAN_TIMEOUT_MS = 2_000
         private const val EXTERNAL_COMPANION_QUIET_MS = 900L
         private const val EXTERNAL_CAPTURE_MAX_WAIT_MS = 3_000L
         private const val EXTERNAL_CAPTURE_RENOTIFY_DELAY_MS = 300L

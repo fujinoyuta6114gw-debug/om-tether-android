@@ -27,6 +27,7 @@ import com.example.omtether.image.NeutralPatchResult
 import com.example.omtether.storage.CaptureStorage
 import com.example.omtether.storage.SavedObject
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -126,6 +127,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var appInForeground = true
     private var recoverPtpAfterPermission = false
     private var realCameraConnectedOnce = false
+    @Volatile
+    private var lastDiagnosticsText = "OM Tether 0.3.4\nCamera controller has not been activated."
 
     private val usbReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
@@ -501,8 +504,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun diagnosticsText(): String = controller?.diagnosticsText()
-        ?: "OM Tether 0.3.3\nCamera controller is not active."
+    fun diagnosticsText(): String = controller?.diagnosticsText()?.also {
+        lastDiagnosticsText = it
+    } ?: lastDiagnosticsText
 
     fun restartLiveView() {
         if (controller is MockCameraController) return
@@ -600,10 +604,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 // interrupted reliably by coroutine cancellation alone. Close the old
                 // UsbDeviceConnection first so the read unblocks, then finish cleanup
                 // within a short bound before opening a fresh PTP session.
+                rememberDiagnostics(old)
                 runCatching { old.forceClose() }
                 withTimeoutOrNull(CONTROLLER_SHUTDOWN_TIMEOUT_MS) {
                     runCatching { old.disconnect() }
                 }
+                rememberDiagnostics(old)
                 delay(USB_REOPEN_SETTLE_MS)
             }
             controller = newController
@@ -631,6 +637,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 )
             }
             var connectionTimedOut = false
+            val firstFrameReady = CompletableDeferred<Unit>()
             val connectionTimeoutJob = if (demo) {
                 null
             } else {
@@ -638,18 +645,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     delay(CONNECTION_TIMEOUT_MS)
                     if (
                         controller === newController &&
-                        mutableState.value.phase == ConnectionPhase.CONNECTING
+                        firstFrameReady.completeExceptionally(
+                            IllegalStateException("First live-view frame timed out"),
+                        )
                     ) {
                         connectionTimedOut = true
-                        // bulkTransfer is a blocking Android USB call. Closing the
-                        // UsbDeviceConnection releases it when PTP initialization stalls.
+                        // Keep the timeout armed through live-view property setup and the
+                        // first successfully decoded JPEG. Closing UsbDeviceConnection is
+                        // what releases a blocking Android bulkTransfer.
                         newController.forceClose()
                     }
                 }
             }
             try {
                 val session = newController.connect()
-                connectionTimeoutJob?.cancel()
                 if (!demo) realCameraConnectedOnce = true
                 val generation = frameGeneration
                 frameCollectionJob = viewModelScope.launch {
@@ -658,7 +667,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     newController.frames.conflate().collect { jpeg ->
                         val announceFirstFrame = lastLiveFrameReceivedAt == 0L
                         lastLiveFrameReceivedAt = SystemClock.elapsedRealtime()
-                        updateFrame(jpeg, generation, announceFirstFrame)
+                        if (updateFrame(jpeg, generation, announceFirstFrame)) {
+                            firstFrameReady.complete(Unit)
+                        }
                     }
                 }
                 if (!demo) {
@@ -695,10 +706,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 mutableState.update {
                     it.copy(
-                        phase = if (demo) ConnectionPhase.DEMO else ConnectionPhase.CONNECTED,
+                        phase = if (demo) ConnectionPhase.DEMO else ConnectionPhase.CONNECTING,
                         identity = session.identity,
                         exposureControls = session.exposureControls,
-                        exposureSyncActive = !demo,
+                        exposureSyncActive = false,
                         statusMessage = if (demo) {
                             "デモモード — USB接続で実機へ切り替えられます"
                         } else {
@@ -710,8 +721,28 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     liveViewStartedAt = SystemClock.elapsedRealtime()
                     newController.startLiveView()
                     if (!demo) {
+                        firstFrameReady.await()
+                        connectionTimeoutJob?.cancel()
+                        mutableState.update {
+                            it.copy(
+                                phase = ConnectionPhase.CONNECTED,
+                                exposureSyncActive = true,
+                                statusMessage = when (it.phoneSaveFormat) {
+                                    PhoneSaveFormat.JPEG -> "ライブビュー受信中 — スマホへJPEG保存"
+                                    PhoneSaveFormat.RAW -> "ライブビュー受信中 — スマホへRAW保存"
+                                },
+                            )
+                        }
                         startLiveViewWatchdog(newController, generation)
                         startExposureSync(newController, generation)
+                    }
+                } else if (!demo) {
+                    connectionTimeoutJob?.cancel()
+                    mutableState.update {
+                        it.copy(
+                            phase = ConnectionPhase.CONNECTED,
+                            statusMessage = "アプリを表示するとライブビューを開始します",
+                        )
                     }
                 }
             } catch (error: CancellationException) {
@@ -723,6 +754,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 externalCaptureDebounceJob?.cancel()
                 externalCaptureDebounceJob = null
                 newController.forceClose()
+                rememberDiagnostics(newController)
                 if (controller === newController) controller = null
                 throw error
             } catch (error: Throwable) {
@@ -734,6 +766,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 externalCaptureDebounceJob?.cancel()
                 externalCaptureDebounceJob = null
                 newController.forceClose()
+                rememberDiagnostics(newController)
                 if (controller === newController) controller = null
                 mutableState.update {
                     it.copy(
@@ -761,9 +794,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    private suspend fun updateFrame(jpeg: ByteArray, generation: Long, announceFirstFrame: Boolean) {
+    private suspend fun updateFrame(
+        jpeg: ByteArray,
+        generation: Long,
+        announceFirstFrame: Boolean,
+    ): Boolean {
         val now = SystemClock.elapsedRealtime()
-        if (now - lastFrameDecodedAt < LIVE_FRAME_INTERVAL_MS) return
+        if (now - lastFrameDecodedAt < LIVE_FRAME_INTERVAL_MS) return false
         lastFrameDecodedAt = now
         val snapshot = mutableState.value
         val threshold = snapshot.highlightThreshold
@@ -773,8 +810,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val decodedAndAnalyzed = withContext(Dispatchers.Default) {
             val bitmap = ImageAnalysis.decodeJpeg(jpeg, LIVE_PREVIEW_MAX_DIMENSION) ?: return@withContext null
             bitmap to if (shouldAnalyze) ImageAnalysis.analyze(bitmap, threshold, includeHighlight) else null
-        } ?: return
-        if (generation != frameGeneration) return
+        } ?: return false
+        if (generation != frameGeneration) return false
+        val decodedBitmap = decodedAndAnalyzed.first
         mutableState.update { current ->
             if (
                 generation != frameGeneration ||
@@ -785,7 +823,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             } else {
                 val analysis = decodedAndAnalyzed.second
                 current.copy(
-                    liveBitmap = decodedAndAnalyzed.first,
+                    liveBitmap = decodedBitmap,
                     histogram = analysis?.histogram ?: current.histogram,
                     highlightOverlay = analysis?.highlightOverlay ?: current.highlightOverlay,
                     highlightPercent = analysis?.highlightPercent ?: current.highlightPercent,
@@ -806,6 +844,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 )
             }
         }
+        return generation == frameGeneration && mutableState.value.liveBitmap === decodedBitmap
     }
 
     private fun startLiveViewWatchdog(requestedController: CameraController, generation: Long) {
@@ -853,7 +892,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     !appInForeground ||
                     mutableState.value.phase != ConnectionPhase.CONNECTED ||
                     mutableState.value.isCapturing ||
-                    mutableState.value.liveViewIssue != null
+                    mutableState.value.liveViewIssue != null ||
+                    lastLiveFrameReceivedAt == 0L
                 ) {
                     continue
                 }
@@ -963,9 +1003,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     if (foreground) {
                         liveViewStartedAt = SystemClock.elapsedRealtime()
                         lastLiveFrameReceivedAt = 0L
-                        requestedController.startLiveView()
                         if (requestedController !is MockCameraController) {
                             startLiveViewWatchdog(requestedController, frameGeneration)
+                        }
+                        requestedController.startLiveView()
+                        if (requestedController !is MockCameraController) {
                             startExposureSync(requestedController, frameGeneration)
                         }
                         mutableState.update {
@@ -1027,7 +1069,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         frameCollectionJob = null
         analysisJob?.cancel()
         reviewJob?.cancel()
-        controller?.forceClose()
+        controller?.let { active ->
+            rememberDiagnostics(active)
+            active.forceClose()
+            rememberDiagnostics(active)
+        }
         controller = null
         mutableState.update {
             it.copy(
@@ -1068,8 +1114,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         exposureSyncJob?.cancel()
         externalCaptureEventJob?.cancel()
         externalCaptureDebounceJob?.cancel()
-        controller?.forceClose()
+        controller?.let { active ->
+            rememberDiagnostics(active)
+            active.forceClose()
+            rememberDiagnostics(active)
+        }
         super.onCleared()
+    }
+
+    private fun rememberDiagnostics(source: CameraController) {
+        runCatching { source.diagnosticsText() }
+            .getOrNull()
+            ?.takeIf(String::isNotBlank)
+            ?.let { lastDiagnosticsText = it }
     }
 
     private fun Throwable.userMessage(): String = message?.take(240) ?: this::class.java.simpleName
