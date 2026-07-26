@@ -28,6 +28,7 @@ def main() -> int:
         APP_SOURCE / "java" / "com" / "example" / "omtether" / "ui" / "OmTetherApp.kt",
         ROOT / "app" / "src" / "test" / "java" / "com" / "example" / "omtether" / "SetupGuidePolicyTest.kt",
         ROOT / "app" / "src" / "test" / "java" / "com" / "example" / "omtether" / "camera" / "CaptureSavePolicyTest.kt",
+        ROOT / "app" / "src" / "test" / "java" / "com" / "example" / "omtether" / "camera" / "CameraObjectTrackerTest.kt",
         ROOT / "app" / "src" / "test" / "java" / "com" / "example" / "omtether" / "storage" / "CapturePathPolicyTest.kt",
     ]
     for path in required_files:
@@ -82,6 +83,11 @@ def main() -> int:
         "periodic exposure synchronization": "EXPOSURE_SYNC_INTERVAL_MS",
         "dedicated capture folder": "CapturePathPolicy.relativePath",
         "neutral gray theme": "0xFFB8BEC7",
+        "PTP USB class device reset": "PTP_DEVICE_RESET_REQUEST = 0x66",
+        "forced live-view restart": "Live-view property cleared for recovery",
+        "camera-side shutter event flow": "externalCaptureEvents",
+        "camera-side shutter import": "importExternalCapture",
+        "dual-card new-object watcher": "Camera-side shutter watcher started",
     }
     for label, marker in required_markers.items():
         require(marker in kotlin_source, f"missing implementation marker: {label}")
