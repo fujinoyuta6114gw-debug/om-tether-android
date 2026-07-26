@@ -57,6 +57,8 @@ class OmUsbCameraController(
     private val cameraOperationMutex = Mutex()
     @Volatile
     private var appCaptureActive = false
+    @Volatile
+    private var externalImportActive = false
     private var forceLiveViewRestart = recoverPtpSession
 
     override suspend fun connect(): CameraSession {
@@ -240,8 +242,9 @@ class OmUsbCameraController(
     ): CaptureReport = cameraOperationMutex.withLock {
         val info = deviceInfo ?: throw PtpException(message = "Camera is not connected")
         val resumeLiveView = liveViewJob?.isActive == true
-        stopLiveView()
+        externalImportActive = true
         try {
+            stopLiveView()
             val handles = awaitExternalCaptureHandles()
             if (handles.isEmpty()) {
                 throw PtpException(message = "カメラ側撮影の新規ファイルをカード1/2から確認できませんでした")
@@ -255,9 +258,18 @@ class OmUsbCameraController(
                 onObject = onObject,
             )
         } finally {
+            externalImportActive = false
             if (resumeLiveView && connection != null && coroutineContext.isActive) {
                 runCatching { startLiveView() }
                     .onFailure { log.add("Could not resume live view after camera-side capture: ${it.message}") }
+            }
+            if (objectTracker.pendingCount() > 0 && connection != null && coroutineContext.isActive) {
+                scope.launch {
+                    delay(EXTERNAL_CAPTURE_RENOTIFY_DELAY_MS)
+                    if (!externalImportActive && objectTracker.pendingCount() > 0) {
+                        mutableExternalCaptureEvents.emit(Unit)
+                    }
+                }
             }
         }
     }
@@ -920,7 +932,7 @@ class OmUsbCameraController(
                         objectAddedEvents.trySend(handle)
                         if (objectTracker.recordEvent(handle, queueForImport = !appCaptureActive)) {
                             log.add("Camera-side ObjectAdded queued for Android import")
-                            mutableExternalCaptureEvents.tryEmit(Unit)
+                            if (!externalImportActive) mutableExternalCaptureEvents.tryEmit(Unit)
                         }
                     }
                 }
@@ -1165,6 +1177,7 @@ class OmUsbCameraController(
         private const val EXTERNAL_CAPTURE_POLL_INTERVAL_MS = 250L
         private const val EXTERNAL_COMPANION_QUIET_MS = 900L
         private const val EXTERNAL_CAPTURE_MAX_WAIT_MS = 3_000L
+        private const val EXTERNAL_CAPTURE_RENOTIFY_DELAY_MS = 300L
         private const val FALLBACK_IMAGE_TIMEOUT_MS = 5_000L
         private const val MAX_OBJECTS_PER_CAPTURE = 8
         private const val OBJECT_READ_ATTEMPTS = 6
