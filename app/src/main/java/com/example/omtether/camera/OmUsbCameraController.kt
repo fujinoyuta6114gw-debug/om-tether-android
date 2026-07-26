@@ -34,10 +34,13 @@ import kotlin.coroutines.coroutineContext
 class OmUsbCameraController(
     private val usbManager: UsbManager,
     private val device: UsbDevice,
+    private val recoverPtpSession: Boolean = false,
 ) : CameraController {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val mutableFrames = MutableSharedFlow<ByteArray>(extraBufferCapacity = 1)
     override val frames: Flow<ByteArray> = mutableFrames.asSharedFlow()
+    private val mutableExternalCaptureEvents = MutableSharedFlow<Unit>(extraBufferCapacity = 8)
+    override val externalCaptureEvents: Flow<Unit> = mutableExternalCaptureEvents.asSharedFlow()
     private val log = DiagnosticLog()
 
     private var connection: UsbDeviceConnection? = null
@@ -47,9 +50,14 @@ class OmUsbCameraController(
     private var sessionOpen = false
     private var liveViewJob: Job? = null
     private var eventReaderJob: Job? = null
+    private var objectWatcherJob: Job? = null
     private val objectAddedEvents = Channel<Long>(Channel.UNLIMITED)
+    private val objectTracker = CameraObjectTracker()
     private val descriptors = mutableMapOf<Int, PtpPropertyDescriptor>()
     private val cameraOperationMutex = Mutex()
+    @Volatile
+    private var appCaptureActive = false
+    private var forceLiveViewRestart = recoverPtpSession
 
     override suspend fun connect(): CameraSession {
         require(device.vendorId == Ptp.OM1_MARK_II_VENDOR_ID && device.productId == Ptp.OM1_MARK_II_PRODUCT_ID) {
@@ -72,6 +80,10 @@ class OmUsbCameraController(
                 "Claimed interface=${endpointSet.usbInterface.id} class=${endpointSet.usbInterface.interfaceClass} " +
                     "bulkIn=${Ptp.hex16(endpointSet.bulkIn.address)} bulkOut=${Ptp.hex16(endpointSet.bulkOut.address)}",
             )
+            if (recoverPtpSession) {
+                requestPtpDeviceReset(opened, endpointSet.usbInterface)
+                forceLiveViewRestart = true
+            }
             val activeTransport = PtpUsbTransport(opened, endpointSet.bulkIn, endpointSet.bulkOut, log)
             transport = activeTransport
 
@@ -92,9 +104,11 @@ class OmUsbCameraController(
                 transactionIdOverride = 0L,
             )
             sessionOpen = true
-            endpointSet.interruptIn?.let(::startEventReader)
 
             initializePcMode(info)
+            initializeObjectTracking()
+            endpointSet.interruptIn?.let(::startEventReader)
+            startObjectWatcher()
             val controls = readExposureControls()
             return CameraSession(
                 identity = CameraIdentity(
@@ -119,7 +133,9 @@ class OmUsbCameraController(
         if (Ptp.OMD_GET_LIVE_VIEW_IMAGE !in info.operations) {
             throw PtpException(message = "Camera did not advertise ${Ptp.hex16(Ptp.OMD_GET_LIVE_VIEW_IMAGE)}")
         }
-        initializeLiveViewMode(info)
+        val forceRestart = forceLiveViewRestart
+        initializeLiveViewMode(info, forceRestart)
+        forceLiveViewRestart = false
         liveViewJob = scope.launch {
             var consecutiveErrors = 0
             while (isActive) {
@@ -178,43 +194,8 @@ class OmUsbCameraController(
         }
         val resumeLiveView = liveViewJob?.isActive == true
         stopLiveView()
+        appCaptureActive = true
         try {
-            val warnings = mutableListOf<String>()
-            val summaries = mutableListOf<CaptureObjectSummary>()
-            var previewDelivered = false
-            var previewJpegFallbackUsed = false
-
-            suspend fun deliverPreview(bytes: ByteArray) {
-                try {
-                    onPreview(bytes)
-                    previewDelivered = true
-                } catch (error: CancellationException) {
-                    throw error
-                } catch (error: Throwable) {
-                    val message = "Preview delivery failed: ${error.message}"
-                    warnings += message
-                    log.add(message)
-                }
-            }
-
-            suspend fun deliverObject(item: DownloadedObject) {
-                summaries += CaptureObjectSummary(
-                    handle = item.handle,
-                    filename = item.filename,
-                    format = item.format,
-                    byteCount = item.bytes.size,
-                )
-                try {
-                    onObject(item)
-                } catch (error: CancellationException) {
-                    throw error
-                } catch (error: Throwable) {
-                    val message = "${item.filename} handoff failed: ${error.message}"
-                    warnings += message
-                    log.add(message)
-                }
-            }
-
             drainObjectEvents()
             val baseline = try {
                 getAllObjectHandles().toSet()
@@ -222,6 +203,7 @@ class OmUsbCameraController(
                 log.add("Could not take pre-capture object snapshot: ${error.message}")
                 null
             }
+            baseline?.let { objectTracker.observeSnapshot(it, queueForImport = false) }
 
             logCaptureTarget()
             executeCaptureCommand(parameter = 3L)
@@ -233,131 +215,241 @@ class OmUsbCameraController(
             }
 
             val handles = waitForNewHandles(baseline)
-            val candidates = mutableListOf<ObjectCandidate>()
-            for (handle in handles.take(MAX_OBJECTS_PER_CAPTURE)) {
-                try {
-                    candidates += readObjectCandidate(handle)
-                } catch (error: CancellationException) {
-                    throw error
-                } catch (error: Throwable) {
-                    val message = "Object ${Ptp.hex32(handle)} info failed: ${error.message}"
-                    warnings += message
-                    log.add(message)
-                }
-            }
-
-            log.add(
-                "Phone save=${phoneSaveFormat.name}; candidates=" +
-                    candidates.joinToString { candidate ->
-                        "${candidate.displayName}@${Ptp.hex32(candidate.info.storageId)}"
-                    }.ifBlank { "none" },
-            )
-
-            fun orderedCandidates(format: PhoneSaveFormat): List<ObjectCandidate> {
-                return CaptureSavePolicy
-                    .orderedPreferred(format, candidates.map(ObjectCandidate::info))
-                    .mapNotNull { chosen ->
-                        candidates.firstOrNull { candidate -> candidate.info === chosen }
-                    }
-            }
-
-            when (phoneSaveFormat) {
-                PhoneSaveFormat.JPEG -> {
-                    val fullJpegCandidates = orderedCandidates(PhoneSaveFormat.JPEG)
-                    var jpegThumbnailFallback: DownloadedObject? = null
-                    for (candidate in fullJpegCandidates) {
-                        if (!previewDelivered && candidate.info.thumbSize > 0L) {
-                            readObjectThumbnail(candidate)?.let { thumbnail ->
-                                deliverPreview(thumbnail)
-                                jpegThumbnailFallback = DownloadedObject(
-                                    handle = candidate.handle,
-                                    filename = previewFilename(candidate.info.filename),
-                                    format = CaptureSavePolicy.JPEG_OBJECT_FORMAT,
-                                    bytes = thumbnail,
-                                )
-                            }
-                        }
-                        val item = downloadSelectedObject(candidate, warnings)
-                        if (item != null) {
-                            extractJpeg(item.bytes)?.let { deliverPreview(it) }
-                            deliverObject(item)
-                            break
-                        }
-                    }
-                    if (summaries.isEmpty()) {
-                        var fallback = jpegThumbnailFallback
-                        if (fallback == null) {
-                            for (rawCandidate in orderedCandidates(PhoneSaveFormat.RAW)) {
-                                val preview = readObjectThumbnail(rawCandidate)
-                                if (preview != null) {
-                                    fallback = DownloadedObject(
-                                        handle = rawCandidate.handle,
-                                        filename = previewFilename(rawCandidate.info.filename),
-                                        format = CaptureSavePolicy.JPEG_OBJECT_FORMAT,
-                                        bytes = preview,
-                                    )
-                                    break
-                                }
-                            }
-                        }
-                        if (fallback == null && Ptp.OMD_GET_IMAGE in info.operations) {
-                            fallback = getCapturedJpegFallback()
-                        }
-                        if (fallback != null) {
-                            previewJpegFallbackUsed = true
-                            val message =
-                                "フルJPEGを保存できなかったため、プレビューJPEGを保存しました（解像度・画質に制限があります）"
-                            warnings += message
-                            log.add(message)
-                            deliverPreview(fallback.bytes)
-                            deliverObject(fallback)
-                        }
-                    }
-                }
-
-                PhoneSaveFormat.RAW -> {
-                    val rawCandidates = orderedCandidates(PhoneSaveFormat.RAW)
-                    rawCandidates.firstOrNull { it.info.thumbSize > 0L }
-                        ?.let { readObjectThumbnail(it) }
-                        ?.let { deliverPreview(it) }
-                    if (rawCandidates.isNotEmpty()) {
-                        if (!previewDelivered && Ptp.OMD_GET_IMAGE in info.operations) {
-                            getCapturedJpegFallback()?.let { deliverPreview(it.bytes) }
-                        }
-                        for (candidate in rawCandidates) {
-                            val item = downloadSelectedObject(candidate, warnings)
-                            if (item != null) {
-                                deliverObject(item)
-                                break
-                            }
-                        }
-                    }
-                }
-            }
-
-            if (summaries.isEmpty()) {
-                throw PtpException(
-                    message = when (phoneSaveFormat) {
-                        PhoneSaveFormat.JPEG ->
-                            "シャッター後にJPEGもRAWプレビューも取得できませんでした。カメラのカード保存設定と診断ログを確認してください。"
-                        PhoneSaveFormat.RAW ->
-                            "シャッター後にORFが見つかりませんでした。カメラ側でRAW記録が有効か確認してください。"
-                    },
-                )
-            }
-
-            log.add("Capture complete: ${summaries.joinToString { "${it.filename} (${it.byteCount} B)" }}")
-            return CaptureReport(
-                objects = summaries,
-                warnings = warnings.distinct(),
-                previewJpegFallbackUsed = previewJpegFallbackUsed,
+            objectTracker.markKnown(handles)
+            return transferObjectHandles(
+                info = info,
+                handles = handles,
+                phoneSaveFormat = phoneSaveFormat,
+                sourceLabel = "App shutter",
+                onPreview = onPreview,
+                onObject = onObject,
             )
         } finally {
+            appCaptureActive = false
             if (resumeLiveView && connection != null && coroutineContext.isActive) {
                 runCatching { startLiveView() }
                     .onFailure { log.add("Could not resume live view: ${it.message}") }
             }
         }
+    }
+
+    override suspend fun importExternalCapture(
+        phoneSaveFormat: PhoneSaveFormat,
+        onPreview: suspend (ByteArray) -> Unit,
+        onObject: suspend (DownloadedObject) -> Unit,
+    ): CaptureReport = cameraOperationMutex.withLock {
+        val info = deviceInfo ?: throw PtpException(message = "Camera is not connected")
+        val resumeLiveView = liveViewJob?.isActive == true
+        stopLiveView()
+        try {
+            val handles = awaitExternalCaptureHandles()
+            if (handles.isEmpty()) {
+                throw PtpException(message = "カメラ側撮影の新規ファイルをカード1/2から確認できませんでした")
+            }
+            transferObjectHandles(
+                info = info,
+                handles = handles,
+                phoneSaveFormat = phoneSaveFormat,
+                sourceLabel = "Camera shutter",
+                onPreview = onPreview,
+                onObject = onObject,
+            )
+        } finally {
+            if (resumeLiveView && connection != null && coroutineContext.isActive) {
+                runCatching { startLiveView() }
+                    .onFailure { log.add("Could not resume live view after camera-side capture: ${it.message}") }
+            }
+        }
+    }
+
+    private suspend fun awaitExternalCaptureHandles(): List<Long> {
+        val started = SystemClock.elapsedRealtime()
+        var lastAddedAt = started
+        var previousPendingCount = objectTracker.pendingCount()
+        while (SystemClock.elapsedRealtime() - started < EXTERNAL_CAPTURE_MAX_WAIT_MS) {
+            delay(EXTERNAL_CAPTURE_POLL_INTERVAL_MS)
+            runCatching { getAllObjectHandles() }
+                .onSuccess { handles ->
+                    objectTracker.observeSnapshot(handles, queueForImport = true)
+                }
+                .onFailure { log.add("Camera-side capture poll failed: ${it.message}") }
+            val pendingCount = objectTracker.pendingCount()
+            val now = SystemClock.elapsedRealtime()
+            if (pendingCount > previousPendingCount) lastAddedAt = now
+            previousPendingCount = pendingCount
+            if (pendingCount > 0 && now - lastAddedAt >= EXTERNAL_COMPANION_QUIET_MS) break
+        }
+        return objectTracker.takePending().also { handles ->
+            log.add(
+                "Camera-side capture handles: " +
+                    handles.joinToString { Ptp.hex32(it) }.ifBlank { "none" },
+            )
+        }
+    }
+
+    private suspend fun transferObjectHandles(
+        info: PtpDeviceInfo,
+        handles: List<Long>,
+        phoneSaveFormat: PhoneSaveFormat,
+        sourceLabel: String,
+        onPreview: suspend (ByteArray) -> Unit,
+        onObject: suspend (DownloadedObject) -> Unit,
+    ): CaptureReport {
+        val warnings = mutableListOf<String>()
+        val summaries = mutableListOf<CaptureObjectSummary>()
+        var previewDelivered = false
+        var previewJpegFallbackUsed = false
+
+        suspend fun deliverPreview(bytes: ByteArray) {
+            try {
+                onPreview(bytes)
+                previewDelivered = true
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                val message = "Preview delivery failed: ${error.message}"
+                warnings += message
+                log.add(message)
+            }
+        }
+
+        suspend fun deliverObject(item: DownloadedObject) {
+            summaries += CaptureObjectSummary(
+                handle = item.handle,
+                filename = item.filename,
+                format = item.format,
+                byteCount = item.bytes.size,
+            )
+            try {
+                onObject(item)
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                val message = "${item.filename} handoff failed: ${error.message}"
+                warnings += message
+                log.add(message)
+            }
+        }
+
+        val candidates = mutableListOf<ObjectCandidate>()
+        for (handle in handles.take(MAX_OBJECTS_PER_CAPTURE)) {
+            try {
+                candidates += readObjectCandidate(handle)
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                val message = "Object ${Ptp.hex32(handle)} info failed: ${error.message}"
+                warnings += message
+                log.add(message)
+            }
+        }
+
+        log.add(
+            "$sourceLabel phone save=${phoneSaveFormat.name}; candidates=" +
+                candidates.joinToString { candidate ->
+                    "${candidate.displayName}@${Ptp.hex32(candidate.info.storageId)}"
+                }.ifBlank { "none" },
+        )
+
+        fun orderedCandidates(format: PhoneSaveFormat): List<ObjectCandidate> {
+            return CaptureSavePolicy
+                .orderedPreferred(format, candidates.map(ObjectCandidate::info))
+                .mapNotNull { chosen ->
+                    candidates.firstOrNull { candidate -> candidate.info === chosen }
+                }
+        }
+
+        when (phoneSaveFormat) {
+            PhoneSaveFormat.JPEG -> {
+                val fullJpegCandidates = orderedCandidates(PhoneSaveFormat.JPEG)
+                var jpegThumbnailFallback: DownloadedObject? = null
+                for (candidate in fullJpegCandidates) {
+                    if (!previewDelivered && candidate.info.thumbSize > 0L) {
+                        readObjectThumbnail(candidate)?.let { thumbnail ->
+                            deliverPreview(thumbnail)
+                            jpegThumbnailFallback = DownloadedObject(
+                                handle = candidate.handle,
+                                filename = previewFilename(candidate.info.filename),
+                                format = CaptureSavePolicy.JPEG_OBJECT_FORMAT,
+                                bytes = thumbnail,
+                            )
+                        }
+                    }
+                    val item = downloadSelectedObject(candidate, warnings)
+                    if (item != null) {
+                        extractJpeg(item.bytes)?.let { deliverPreview(it) }
+                        deliverObject(item)
+                        break
+                    }
+                }
+                if (summaries.isEmpty()) {
+                    var fallback = jpegThumbnailFallback
+                    if (fallback == null) {
+                        for (rawCandidate in orderedCandidates(PhoneSaveFormat.RAW)) {
+                            val preview = readObjectThumbnail(rawCandidate)
+                            if (preview != null) {
+                                fallback = DownloadedObject(
+                                    handle = rawCandidate.handle,
+                                    filename = previewFilename(rawCandidate.info.filename),
+                                    format = CaptureSavePolicy.JPEG_OBJECT_FORMAT,
+                                    bytes = preview,
+                                )
+                                break
+                            }
+                        }
+                    }
+                    if (fallback == null && Ptp.OMD_GET_IMAGE in info.operations) {
+                        fallback = getCapturedJpegFallback()
+                    }
+                    if (fallback != null) {
+                        previewJpegFallbackUsed = true
+                        val message =
+                            "フルJPEGを保存できなかったため、プレビューJPEGを保存しました（解像度・画質に制限があります）"
+                        warnings += message
+                        log.add(message)
+                        deliverPreview(fallback.bytes)
+                        deliverObject(fallback)
+                    }
+                }
+            }
+
+            PhoneSaveFormat.RAW -> {
+                val rawCandidates = orderedCandidates(PhoneSaveFormat.RAW)
+                rawCandidates.firstOrNull { it.info.thumbSize > 0L }
+                    ?.let { readObjectThumbnail(it) }
+                    ?.let { deliverPreview(it) }
+                if (rawCandidates.isNotEmpty()) {
+                    if (!previewDelivered && Ptp.OMD_GET_IMAGE in info.operations) {
+                        getCapturedJpegFallback()?.let { deliverPreview(it.bytes) }
+                    }
+                    for (candidate in rawCandidates) {
+                        val item = downloadSelectedObject(candidate, warnings)
+                        if (item != null) {
+                            deliverObject(item)
+                            break
+                        }
+                    }
+                }
+            }
+        }
+
+        if (summaries.isEmpty()) {
+            throw PtpException(
+                message = when (phoneSaveFormat) {
+                    PhoneSaveFormat.JPEG ->
+                        "シャッター後にJPEGもRAWプレビューも取得できませんでした。カメラのカード保存設定と診断ログを確認してください。"
+                    PhoneSaveFormat.RAW ->
+                        "シャッター後にORFが見つかりませんでした。カメラ側でRAW記録が有効か確認してください。"
+                },
+            )
+        }
+
+        log.add("$sourceLabel complete: ${summaries.joinToString { "${it.filename} (${it.byteCount} B)" }}")
+        return CaptureReport(
+            objects = summaries,
+            warnings = warnings.distinct(),
+            previewJpegFallbackUsed = previewJpegFallbackUsed,
+        )
     }
 
     private suspend fun downloadSelectedObject(
@@ -419,6 +511,8 @@ class OmUsbCameraController(
 
     override suspend fun disconnect() {
         runCatching { stopLiveView() }
+        objectWatcherJob?.cancelAndJoin()
+        objectWatcherJob = null
         eventReaderJob?.cancelAndJoin()
         eventReaderJob = null
         if (sessionOpen) {
@@ -434,6 +528,8 @@ class OmUsbCameraController(
     override fun forceClose() {
         liveViewJob?.cancel()
         liveViewJob = null
+        objectWatcherJob?.cancel()
+        objectWatcherJob = null
         eventReaderJob?.cancel()
         eventReaderJob = null
         sessionOpen = false
@@ -442,7 +538,7 @@ class OmUsbCameraController(
     }
 
     override fun diagnosticsText(): String = buildString {
-        appendLine("OM Tether 0.3.1")
+        appendLine("OM Tether 0.3.2")
         appendLine("USB: VID=${Ptp.hex16(device.vendorId)} PID=${Ptp.hex16(device.productId)} name=${device.deviceName}")
         deviceInfo?.let { info ->
             appendLine("Camera: ${info.manufacturer} ${info.model}")
@@ -526,7 +622,7 @@ class OmUsbCameraController(
         }
     }
 
-    private suspend fun initializeLiveViewMode(info: PtpDeviceInfo) {
+    private suspend fun initializeLiveViewMode(info: PtpDeviceInfo, forceRestart: Boolean) {
         val descriptor = if (Ptp.PROP_LIVE_VIEW_MODE in info.properties) {
             runCatching { getDescriptor(Ptp.PROP_LIVE_VIEW_MODE) }
                 .onFailure { log.add("Live-view descriptor unavailable: ${it.message}") }
@@ -535,9 +631,25 @@ class OmUsbCameraController(
             log.add("Live-view property ${Ptp.hex16(Ptp.PROP_LIVE_VIEW_MODE)} was not advertised; using verified OM-D initialization value")
             null
         }
-        if (descriptor?.current?.raw == Ptp.LIVE_VIEW_ENABLED_VALUE) return
         if (descriptor != null && (!descriptor.writable || descriptor.dataType != Ptp.TYPE_UINT32)) {
             log.add("Refusing live-view mode write with descriptor type/access mismatch")
+            return
+        }
+        if (forceRestart) {
+            runCatching {
+                setKnownPropertyWhenReady(
+                    propertyCode = Ptp.PROP_LIVE_VIEW_MODE,
+                    value = PtpScalar(Ptp.TYPE_UINT32, 0L),
+                )
+            }.onSuccess {
+                log.add("Live-view property cleared for recovery")
+                delay(LIVE_VIEW_RESTART_SETTLE_MS)
+            }.onFailure {
+                // Some firmware rejects the disabled value while still accepting a fresh
+                // enabled value, so retain this as a fallback rather than aborting reconnect.
+                log.add("Live-view clear was not accepted: ${it.message}")
+            }
+        } else if (descriptor?.current?.raw == Ptp.LIVE_VIEW_ENABLED_VALUE) {
             return
         }
         runCatching {
@@ -551,6 +663,29 @@ class OmUsbCameraController(
         }.onFailure {
             log.add("Live-view initialization was not accepted: ${it.message}")
         }
+    }
+
+    private suspend fun requestPtpDeviceReset(
+        activeConnection: UsbDeviceConnection,
+        usbInterface: UsbInterface,
+    ) {
+        val requestType =
+            UsbConstants.USB_DIR_OUT or UsbConstants.USB_TYPE_CLASS or UsbConstants.USB_RECIP_INTERFACE
+        val result = activeConnection.controlTransfer(
+            requestType,
+            PTP_DEVICE_RESET_REQUEST,
+            0,
+            usbInterface.id,
+            null,
+            0,
+            USB_CONTROL_TIMEOUT_MS,
+        )
+        if (result < 0) {
+            log.add("PTP USB class DeviceReset 0x66 was not accepted; continuing with live-view reset fallback")
+        } else {
+            log.add("PTP USB class DeviceReset 0x66 completed")
+        }
+        delay(PTP_RESET_SETTLE_MS)
     }
 
     private suspend fun setKnownPropertyWhenReady(propertyCode: Int, value: PtpScalar) {
@@ -643,6 +778,47 @@ class OmUsbCameraController(
             parameters = listOf(0xFFFF_FFFFL, 0L, 0L),
         ).data ?: throw PtpException(message = "GetObjectHandles returned no data")
         return PtpDatasetParser.objectHandles(data)
+    }
+
+    private suspend fun initializeObjectTracking() {
+        runCatching { getAllObjectHandles() }
+            .onSuccess { handles ->
+                objectTracker.initialize(handles)
+                log.add("Object baseline initialized across card 1/2: ${handles.size} handles")
+            }
+            .onFailure {
+                // The first successful watcher poll becomes the silent baseline. Explicit
+                // interrupt events are still retained if they arrive before then.
+                log.add("Object baseline unavailable; watcher will retry: ${it.message}")
+            }
+    }
+
+    private fun startObjectWatcher() {
+        if (objectWatcherJob?.isActive == true) return
+        objectWatcherJob = scope.launch {
+            while (isActive) {
+                delay(OBJECT_WATCH_INTERVAL_MS)
+                if (!sessionOpen) continue
+                try {
+                    val shouldNotify = cameraOperationMutex.withLock {
+                        val handles = getAllObjectHandles()
+                        objectTracker.observeSnapshot(
+                            handles = handles,
+                            queueForImport = !appCaptureActive,
+                        )
+                    }
+                    if (shouldNotify) {
+                        log.add("New camera-side object found by card 1/2 polling")
+                        mutableExternalCaptureEvents.tryEmit(Unit)
+                    }
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (error: Throwable) {
+                    if (isActive) log.add("Object watcher poll failed: ${error.message}")
+                }
+            }
+        }
+        log.add("Camera-side shutter watcher started")
     }
 
     private suspend fun waitForNewHandles(baseline: Set<Long>?): List<Long> {
@@ -740,7 +916,13 @@ class OmUsbCameraController(
                 val parameters = runCatching { PtpCodec.responseParameters(event.payload) }.getOrDefault(emptyList())
                 log.add("USB event ${Ptp.hex16(event.code)} params=${parameters.joinToString { Ptp.hex32(it) }}")
                 if (event.code in OBJECT_ADDED_EVENT_CODES) {
-                    parameters.firstOrNull()?.let { objectAddedEvents.trySend(it) }
+                    parameters.firstOrNull()?.let { handle ->
+                        objectAddedEvents.trySend(handle)
+                        if (objectTracker.recordEvent(handle, queueForImport = !appCaptureActive)) {
+                            log.add("Camera-side ObjectAdded queued for Android import")
+                            mutableExternalCaptureEvents.tryEmit(Unit)
+                        }
+                    }
                 }
             }
             offset += length
@@ -971,9 +1153,17 @@ class OmUsbCameraController(
     }
 
     companion object {
+        private const val PTP_DEVICE_RESET_REQUEST = 0x66
+        private const val USB_CONTROL_TIMEOUT_MS = 2_000
+        private const val PTP_RESET_SETTLE_MS = 300L
+        private const val LIVE_VIEW_RESTART_SETTLE_MS = 180L
         private const val CAPTURE_TIMEOUT_MS = 12_000L
         private const val COMPANION_OBJECT_WAIT_MS = 2_500L
         private const val STORAGE_POLL_INTERVAL_MS = 700L
+        private const val OBJECT_WATCH_INTERVAL_MS = 1_200L
+        private const val EXTERNAL_CAPTURE_POLL_INTERVAL_MS = 250L
+        private const val EXTERNAL_COMPANION_QUIET_MS = 900L
+        private const val EXTERNAL_CAPTURE_MAX_WAIT_MS = 3_000L
         private const val FALLBACK_IMAGE_TIMEOUT_MS = 5_000L
         private const val MAX_OBJECTS_PER_CAPTURE = 8
         private const val OBJECT_READ_ATTEMPTS = 6
