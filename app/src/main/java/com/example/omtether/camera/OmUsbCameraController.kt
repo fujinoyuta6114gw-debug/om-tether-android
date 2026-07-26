@@ -108,10 +108,13 @@ class OmUsbCameraController(
             sessionOpen = true
 
             initializePcMode(info)
-            initializeObjectTracking()
-            endpointSet.interruptIn?.let(::startEventReader)
-            startObjectWatcher()
             val controls = readExposureControls()
+            // Do not scan every object on card 1/2 before returning from connect().
+            // Some OM bodies keep GetObjectHandles pending while entering PC/live-view
+            // mode, which used to leave the UI at "connecting" indefinitely. Prefer the
+            // interrupt endpoint and use storage polling only when that path is absent.
+            endpointSet.interruptIn?.let(::startEventReader) ?: startObjectWatcher()
+            log.add("Initial card scan skipped so live view can start immediately")
             return CameraSession(
                 identity = CameraIdentity(
                     manufacturer = info.manufacturer,
@@ -550,7 +553,7 @@ class OmUsbCameraController(
     }
 
     override fun diagnosticsText(): String = buildString {
-        appendLine("OM Tether 0.3.2")
+        appendLine("OM Tether 0.3.3")
         appendLine("USB: VID=${Ptp.hex16(device.vendorId)} PID=${Ptp.hex16(device.productId)} name=${device.deviceName}")
         deviceInfo?.let { info ->
             appendLine("Camera: ${info.manufacturer} ${info.model}")
@@ -792,19 +795,6 @@ class OmUsbCameraController(
         return PtpDatasetParser.objectHandles(data)
     }
 
-    private suspend fun initializeObjectTracking() {
-        runCatching { getAllObjectHandles() }
-            .onSuccess { handles ->
-                objectTracker.initialize(handles)
-                log.add("Object baseline initialized across card 1/2: ${handles.size} handles")
-            }
-            .onFailure {
-                // The first successful watcher poll becomes the silent baseline. Explicit
-                // interrupt events are still retained if they arrive before then.
-                log.add("Object baseline unavailable; watcher will retry: ${it.message}")
-            }
-    }
-
     private fun startObjectWatcher() {
         if (objectWatcherJob?.isActive == true) return
         objectWatcherJob = scope.launch {
@@ -867,8 +857,9 @@ class OmUsbCameraController(
         eventReaderJob = scope.launch {
             val request = UsbRequest()
             if (!request.initialize(activeConnection, endpoint)) {
-                log.add("Interrupt endpoint could not be initialized; object polling remains active")
+                log.add("Interrupt endpoint could not be initialized; starting card 1/2 polling")
                 request.close()
+                startObjectWatcher()
                 return@launch
             }
             val buffer = ByteBuffer.allocate(128)
@@ -912,6 +903,14 @@ class OmUsbCameraController(
             } finally {
                 if (queued) runCatching { request.cancel() }
                 request.close()
+                if (
+                    sessionOpen &&
+                    connection === activeConnection &&
+                    coroutineContext.isActive
+                ) {
+                    log.add("Interrupt event reader ended; starting card 1/2 polling")
+                    startObjectWatcher()
+                }
             }
         }
         log.add("Interrupt event reader started at ${Ptp.hex16(endpoint.address)}")
