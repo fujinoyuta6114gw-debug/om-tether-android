@@ -8,6 +8,7 @@ import android.hardware.usb.UsbInterface
 import android.hardware.usb.UsbManager
 import android.hardware.usb.UsbRequest
 import android.os.SystemClock
+import com.example.omtether.BuildConfig
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -85,6 +86,10 @@ class OmUsbCameraController(
                 "Claimed interface=${endpointSet.usbInterface.id} class=${endpointSet.usbInterface.interfaceClass} " +
                     "bulkIn=${Ptp.hex16(endpointSet.bulkIn.address)} bulkOut=${Ptp.hex16(endpointSet.bulkOut.address)}",
             )
+            log.add(
+                "PTP bulk maxPacketSize IN=${endpointSet.bulkIn.maxPacketSize} " +
+                    "OUT=${endpointSet.bulkOut.maxPacketSize}",
+            )
             if (recoverPtpSession) {
                 requestPtpDeviceReset(opened, endpointSet.usbInterface)
                 forceLiveViewRestart = true
@@ -136,6 +141,7 @@ class OmUsbCameraController(
 
     override suspend fun startLiveView() {
         if (liveViewJob?.isActive == true) return
+        if (!scope.isActive) throw CancellationException("Camera controller is closed")
         val info = deviceInfo ?: throw PtpException(message = "Camera is not connected")
         if (Ptp.OMD_GET_LIVE_VIEW_IMAGE !in info.operations) {
             throw PtpException(message = "Camera did not advertise ${Ptp.hex16(Ptp.OMD_GET_LIVE_VIEW_IMAGE)}")
@@ -173,6 +179,8 @@ class OmUsbCameraController(
                         log.add("Live view error: ${error.message}")
                     }
                     delay(if (consecutiveErrors >= 5) 500 else 80)
+                } catch (error: CancellationException) {
+                    throw error
                 } catch (error: Throwable) {
                     consecutiveErrors++
                     log.add("Live view stopped by I/O error: ${error.message}")
@@ -224,7 +232,7 @@ class OmUsbCameraController(
             executeCaptureCommand(parameter = 6L)
             delay(80)
             if (Ptp.OMD_CHANGED_PROPERTIES in info.operations) {
-                runCatching { requiredTransport().execute(Ptp.OMD_CHANGED_PROPERTIES) }
+                runCatchingNonCancellation { requiredTransport().execute(Ptp.OMD_CHANGED_PROPERTIES) }
                     .onFailure { log.add("ChangedProperties read failed: ${it.message}") }
             }
 
@@ -241,7 +249,7 @@ class OmUsbCameraController(
         } finally {
             appCaptureActive = false
             if (resumeLiveView && connection != null && coroutineContext.isActive) {
-                runCatching { startLiveView() }
+                runCatchingNonCancellation { startLiveView() }
                     .onFailure { log.add("Could not resume live view: ${it.message}") }
             }
         }
@@ -272,7 +280,7 @@ class OmUsbCameraController(
         } finally {
             externalImportActive = false
             if (resumeLiveView && connection != null && coroutineContext.isActive) {
-                runCatching { startLiveView() }
+                runCatchingNonCancellation { startLiveView() }
                     .onFailure { log.add("Could not resume live view after camera-side capture: ${it.message}") }
             }
             if (objectTracker.pendingCount() > 0 && connection != null && coroutineContext.isActive) {
@@ -292,7 +300,7 @@ class OmUsbCameraController(
         var previousPendingCount = objectTracker.pendingCount()
         while (SystemClock.elapsedRealtime() - started < EXTERNAL_CAPTURE_MAX_WAIT_MS) {
             delay(EXTERNAL_CAPTURE_POLL_INTERVAL_MS)
-            runCatching { getAllObjectHandles(EXTERNAL_CAPTURE_SCAN_TIMEOUT_MS) }
+            runCatchingNonCancellation { getAllObjectHandles(EXTERNAL_CAPTURE_SCAN_TIMEOUT_MS) }
                 .onSuccess { handles ->
                     objectTracker.observeSnapshot(handles, queueForImport = true)
                 }
@@ -509,7 +517,7 @@ class OmUsbCameraController(
                 val code = definition.candidates.firstOrNull(descriptors::containsKey)
                     ?: return@mapNotNull null
                 val previous = descriptors.getValue(code)
-                val current = runCatching {
+                val current = runCatchingNonCancellation {
                     getPropertyValue(
                         code = code,
                         dataType = previous.dataType,
@@ -581,7 +589,7 @@ class OmUsbCameraController(
     }
 
     override fun diagnosticsText(): String = buildString {
-        appendLine("OM Tether 0.3.4")
+        appendLine("OM Tether ${BuildConfig.VERSION_NAME}")
         appendLine("USB: VID=${Ptp.hex16(device.vendorId)} PID=${Ptp.hex16(device.productId)} name=${device.deviceName}")
         deviceInfo?.let { info ->
             appendLine("Camera: ${info.manufacturer} ${info.model}")
@@ -595,7 +603,7 @@ class OmUsbCameraController(
     }
 
     private suspend fun logCaptureTarget() {
-        runCatching {
+        runCatchingNonCancellation {
             val bytes = requiredTransport().execute(
                 Ptp.GET_DEVICE_PROP_VALUE,
                 parameters = listOf(Ptp.PROP_CAPTURE_TARGET.toLong()),
@@ -638,7 +646,7 @@ class OmUsbCameraController(
 
     private suspend fun initializePcMode(info: PtpDeviceInfo) {
         val descriptor = if (Ptp.PROP_PC_MODE in info.properties) {
-            runCatching {
+            runCatchingNonCancellation {
                 getDescriptor(
                     Ptp.PROP_PC_MODE,
                     CONTROL_PROPERTY_TRANSFER_TIMEOUT_MS,
@@ -657,7 +665,7 @@ class OmUsbCameraController(
 
         // OM-D initialization uses UINT16 value 1 even on bodies that omit D052 from DeviceInfo.
         // Identity has already been checked against both the OM-1 Mark II USB ID and PTP strings.
-        runCatching {
+        runCatchingNonCancellation {
             setKnownPropertyWhenReady(
                 propertyCode = Ptp.PROP_PC_MODE,
                 value = PtpScalar(Ptp.TYPE_UINT16, 1L),
@@ -673,7 +681,7 @@ class OmUsbCameraController(
 
     private suspend fun initializeLiveViewMode(info: PtpDeviceInfo, forceRestart: Boolean) {
         val descriptor = if (Ptp.PROP_LIVE_VIEW_MODE in info.properties) {
-            runCatching {
+            runCatchingNonCancellation {
                 getDescriptor(
                     Ptp.PROP_LIVE_VIEW_MODE,
                     CONTROL_PROPERTY_TRANSFER_TIMEOUT_MS,
@@ -690,7 +698,7 @@ class OmUsbCameraController(
             return
         }
         if (forceRestart) {
-            runCatching {
+            runCatchingNonCancellation {
                 setKnownPropertyWhenReady(
                     propertyCode = Ptp.PROP_LIVE_VIEW_MODE,
                     value = PtpScalar(Ptp.TYPE_UINT32, 0L),
@@ -707,7 +715,7 @@ class OmUsbCameraController(
         } else if (descriptor?.current?.raw == Ptp.LIVE_VIEW_ENABLED_VALUE) {
             return
         }
-        runCatching {
+        runCatchingNonCancellation {
             setKnownPropertyWhenReady(
                 propertyCode = Ptp.PROP_LIVE_VIEW_MODE,
                 value = PtpScalar(Ptp.TYPE_UINT32, Ptp.LIVE_VIEW_ENABLED_VALUE),
@@ -785,7 +793,7 @@ class OmUsbCameraController(
             definition.candidates
                 .sortedByDescending(supported::contains)
                 .firstNotNullOfOrNull { code ->
-                    val descriptor = runCatching {
+                    val descriptor = runCatchingNonCancellation {
                         getDescriptor(code, EXPOSURE_PROPERTY_TRANSFER_TIMEOUT_MS)
                     }
                         .onFailure {
@@ -798,7 +806,16 @@ class OmUsbCameraController(
                     ExposureFormatter.toControl(definition.title, descriptor)
                 }
         }
-        exposureDescriptorsInitialized = true
+        // A transient failure is common while the body is switching into RAW/Control.
+        // Keep initialization open until at least one advertised property is readable;
+        // the periodic sync can then retry instead of permanently freezing empty controls.
+        val advertisedExposureProperty = ExposureFormatter.definitions.any { definition ->
+            definition.candidates.any { it in supported }
+        }
+        exposureDescriptorsInitialized = !advertisedExposureProperty || controls.isNotEmpty()
+        if (advertisedExposureProperty && controls.isEmpty()) {
+            log.add("No exposure descriptors were readable yet; will retry after live view starts")
+        }
         return controls
     }
 
@@ -905,7 +922,7 @@ class OmUsbCameraController(
             val now = SystemClock.elapsedRealtime()
             if (baseline != null && now - lastStoragePollAt >= STORAGE_POLL_INTERVAL_MS) {
                 lastStoragePollAt = now
-                val current = runCatching { getAllObjectHandles(CAPTURE_HANDLE_SCAN_TIMEOUT_MS) }
+                val current = runCatchingNonCancellation { getAllObjectHandles(CAPTURE_HANDLE_SCAN_TIMEOUT_MS) }
                     .onFailure { log.add("Object poll failed: ${it.message}") }
                     .getOrNull()
                 if (current != null) found += current.filterNot(baseline::contains)
@@ -951,10 +968,10 @@ class OmUsbCameraController(
                         if (isActive) log.add("Interrupt endpoint stopped: ${error.message}")
                         break
                     }
-                    if (completed == null) {
-                        log.add("Interrupt endpoint returned an I/O error; object polling remains active")
-                        break
-                    }
+                    // Android returns null when requestWait(timeout) expires. A quiet
+                    // camera is normal; treating that timeout as a terminal I/O error
+                    // silently disabled ObjectAdded notifications after ~500 ms.
+                    if (completed == null) continue
                     if (completed !== request) {
                         log.add("Unexpected UsbRequest completion on event reader")
                         break
@@ -1132,6 +1149,19 @@ class OmUsbCameraController(
 
     private fun requiredTransport(): PtpUsbTransport = transport
         ?: throw PtpException(message = "PTP transport is not open")
+
+    /**
+     * `runCatching` also catches CancellationException. That is useful for synchronous
+     * parsing, but dangerous around USB suspending operations: a reconnect could cancel a
+     * blocked setup call and then accidentally continue using a controller being closed.
+     */
+    private suspend fun <T> runCatchingNonCancellation(block: suspend () -> T): Result<T> = try {
+        Result.success(block())
+    } catch (error: CancellationException) {
+        throw error
+    } catch (error: Throwable) {
+        Result.failure(error)
+    }
 
     @Synchronized
     private fun releaseUsb() {

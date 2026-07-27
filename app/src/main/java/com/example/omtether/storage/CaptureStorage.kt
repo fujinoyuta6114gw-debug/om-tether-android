@@ -78,8 +78,9 @@ class CaptureStorage(private val context: Context) {
             .ifBlank { "OM_CAPTURE_${System.currentTimeMillis()}.BIN" }
         if (leaf.length <= 120) return leaf
         val extension = leaf.substringAfterLast('.', "")
-        val stemLimit = if (extension.isBlank()) 120 else 119 - extension.length
-        return leaf.take(stemLimit) + if (extension.isBlank()) "" else ".$extension"
+        if (extension.isBlank() || extension.length >= 120) return leaf.take(120)
+        val stemLimit = (119 - extension.length).coerceAtLeast(1)
+        return leaf.take(stemLimit) + ".${extension}"
     }
 
     private fun mimeType(filename: String): String = when (filename.substringAfterLast('.', "").lowercase()) {

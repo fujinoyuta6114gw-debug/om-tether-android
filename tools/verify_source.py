@@ -107,6 +107,10 @@ def main() -> int:
         "retained failure diagnostics": "lastDiagnosticsText",
         "USB cable speed assessment": "assessUsbCable",
         "USB cable guide notice": "UsbCableNotice",
+        "USB event timeout remains armed": "if (completed == null) continue",
+        "cancellation-safe USB suspends": "runCatchingNonCancellation",
+        "retryable exposure initialization": "will retry after live view starts",
+        "build-synchronized diagnostics": "BuildConfig.VERSION_NAME",
     }
     for label, marker in required_markers.items():
         require(marker in kotlin_source, f"missing implementation marker: {label}")

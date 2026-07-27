@@ -129,7 +129,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var recoverPtpAfterPermission = false
     private var realCameraConnectedOnce = false
     @Volatile
-    private var lastDiagnosticsText = "OM Tether 0.3.4\nCamera controller has not been activated."
+    private var lastDiagnosticsText = "OM Tether ${BuildConfig.VERSION_NAME}\nCamera controller has not been activated."
 
     private val usbReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
@@ -1150,14 +1150,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         device.vendorId == Ptp.OM1_MARK_II_VENDOR_ID && device.productId == Ptp.OM1_MARK_II_PRODUCT_ID
 
     private fun assessUsbCableForDevice(device: UsbDevice): UsbCableAssessment {
-        val bulkPacketSizes = (0 until device.interfaceCount)
+        val stillImageInterfaces = (0 until device.interfaceCount)
             .map(device::getInterface)
-            .flatMap { usbInterface ->
-                (0 until usbInterface.endpointCount)
-                    .map(usbInterface::getEndpoint)
-                    .filter { it.type == android.hardware.usb.UsbConstants.USB_ENDPOINT_XFER_BULK }
-                    .map { it.maxPacketSize }
-            }
+            .filter { it.interfaceClass == android.hardware.usb.UsbConstants.USB_CLASS_STILL_IMAGE }
+        // Use the same still-image/PTP interface that the controller claims. Other USB
+        // interfaces can advertise unrelated bulk sizes and would make the cable estimate
+        // look faster than the actual camera data path.
+        val interfaces = stillImageInterfaces.ifEmpty {
+            (0 until device.interfaceCount).map(device::getInterface)
+        }
+        val bulkPacketSizes = interfaces.flatMap { usbInterface ->
+            (0 until usbInterface.endpointCount)
+                .map(usbInterface::getEndpoint)
+                .filter { it.type == android.hardware.usb.UsbConstants.USB_ENDPOINT_XFER_BULK }
+                .map { it.maxPacketSize }
+        }
         return assessUsbCable(bulkPacketSizes)
     }
 
