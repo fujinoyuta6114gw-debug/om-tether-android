@@ -39,6 +39,8 @@ import com.example.omtether.ConnectionPhase
 import com.example.omtether.DisplayCalibration
 import com.example.omtether.MainUiState
 import com.example.omtether.NeutralPatchAssessment
+import com.example.omtether.UsbCableAssessment
+import com.example.omtether.UsbCableGrade
 import com.example.omtether.assessNeutralPatch
 import com.example.omtether.canAdvanceSetup
 import com.example.omtether.image.NeutralPatchResult
@@ -182,6 +184,7 @@ private fun CameraConnectionStep(state: MainUiState, onUsbConnect: () -> Unit) =
 @Composable
 internal fun UsbConnectionGuide(
     statusMessage: String,
+    cableAssessment: UsbCableAssessment?,
     onDismiss: () -> Unit,
     onConfirm: () -> Unit,
 ) {
@@ -200,6 +203,7 @@ internal fun UsbConnectionGuide(
                 ConnectionStep(4, "カメラ画面で［0 RAW/Control］を選択し、OK")
                 ConnectionStep(5, "画質とカード1/2の振り分け設定を確認")
                 Notice("カード1＝RAW／カード2＝JPEGでもOK。スマホ側の保存形式は撮影画面で選べます。")
+                UsbCableNotice(cableAssessment)
                 Notice(
                     "選択画面が出ない場合：MENU → e → 3. モニター/音/接続 → USBの設定 → " +
                         "USB接続モード → 毎回確認",
@@ -219,6 +223,28 @@ internal fun UsbConnectionGuide(
             TextButton(onClick = onDismiss) { Text("あとで") }
         },
     )
+}
+
+@Composable
+private fun UsbCableNotice(assessment: UsbCableAssessment?) {
+    val color = when (assessment?.grade) {
+        UsbCableGrade.RECOMMENDED -> Color(0xFFB7E4C7)
+        UsbCableGrade.LIMITED -> Color(0xFFFFD6A5)
+        UsbCableGrade.UNKNOWN, null -> MaterialTheme.colorScheme.onSurfaceVariant
+    }
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Text("ケーブル速度の確認", fontWeight = FontWeight.Bold)
+        Text(
+            assessment?.title ?: "未接続：USB 3.x対応データケーブルを推奨",
+            color = color,
+        )
+        Text(
+            assessment?.detail
+                ?: "USB 2.0でも接続できる場合がありますが、RAW転送やライブビューの余裕を考え、USB 3.x対応・データ通信対応ケーブルを端末とカメラへ直結してください。",
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            fontSize = 12.sp,
+        )
+    }
 }
 
 @Composable

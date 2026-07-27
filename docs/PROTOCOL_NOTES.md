@@ -42,6 +42,8 @@ v0.3.4では割り込みエンドポイントが存在してもObjectAdded通知
 
 v0.3.5では、USB接続確認を`GetDeviceInfo`／`OpenSession`までのPTPセッション確立と、PC mode／LiveView mode設定後の最初の正常JPEG受信に分割します。撮影前ガイドは前者が成功した時点で次へ進め、後者は別の20秒ウォッチドッグで監視します。PC mode `0xD052`とLiveView mode `0xD06D`は`startLiveView()`で初期化し、各プロパティ命令を3秒に制限するため、RAW/Control切替中の無応答がガイド全体を固定しません。
 
+v0.3.6では、Androidの`UsbEndpoint.getMaxPacketSize()`で得られるPTPバルクエンドポイントの最大パケットサイズを使い、USB 3.x相当（1024バイト）／USB 2.0相当（512バイト）を接続ガイドへ表示します。これはケーブル単体の速度認証ではなく、端末・アダプター・カメラを含む現在の列挙経路の推定です。
+
 v0.1.1では、通知直後にオブジェクトが未確定の場合を考慮し、`GetObjectInfo`、`GetThumb`、`GetObject` が `DeviceBusy` または `InvalidObjectHandle` を返した場合だけ、待機時間を延ばしながら最大6回再試行します。先に全ObjectInfoを読み、JPEG候補をRAWより先に処理します。サムネイルが公開されている場合は本体転送前に撮影プレビューへ渡します。
 
 v0.2.2ではOM独自プロパティを公開実装の形式に合わせて表示します。絞り `0xD002` は10倍値、シャッター `0xD01C` は上位16bitの分子／下位16bitの分母、露出補正 `0xD008` は符号付き16bitの1/1000 EVとして解釈します。ISOの `0xFFFF` / `0xFFFD` はAUTO / LOWとして扱います。

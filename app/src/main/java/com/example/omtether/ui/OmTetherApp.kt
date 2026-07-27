@@ -201,6 +201,7 @@ fun OmTetherApp(
     if (state.showConnectionGuide) {
         UsbConnectionGuide(
             statusMessage = state.statusMessage,
+            cableAssessment = state.usbCableAssessment,
             onDismiss = onDismissConnectionGuide,
             onConfirm = onConfirmConnectionGuide,
         )

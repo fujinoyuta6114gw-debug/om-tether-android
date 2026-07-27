@@ -23,6 +23,7 @@ def main() -> int:
         APP_SOURCE / "res" / "xml" / "device_filter.xml",
         APP_SOURCE / "java" / "com" / "example" / "omtether" / "MainViewModel.kt",
         APP_SOURCE / "java" / "com" / "example" / "omtether" / "SetupGuidePolicy.kt",
+        APP_SOURCE / "java" / "com" / "example" / "omtether" / "UsbCableAssessment.kt",
         APP_SOURCE / "java" / "com" / "example" / "omtether" / "camera" / "OmUsbCameraController.kt",
         APP_SOURCE / "java" / "com" / "example" / "omtether" / "storage" / "CapturePathPolicy.kt",
         APP_SOURCE / "java" / "com" / "example" / "omtether" / "ui" / "OmTetherApp.kt",
@@ -104,6 +105,8 @@ def main() -> int:
         "bounded card safety polling": "OBJECT_WATCH_TRANSFER_TIMEOUT_MS",
         "pre-baseline companion grouping": "coherentCaptureBatch",
         "retained failure diagnostics": "lastDiagnosticsText",
+        "USB cable speed assessment": "assessUsbCable",
+        "USB cable guide notice": "UsbCableNotice",
     }
     for label, marker in required_markers.items():
         require(marker in kotlin_source, f"missing implementation marker: {label}")

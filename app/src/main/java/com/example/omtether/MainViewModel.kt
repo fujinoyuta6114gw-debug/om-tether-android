@@ -91,6 +91,7 @@ data class MainUiState(
     val setupWbConfirmed: Boolean = false,
     val setupGrayCardSkipped: Boolean = false,
     val liveViewIssue: String? = null,
+    val usbCableAssessment: UsbCableAssessment? = null,
     val statusMessage: String = "USB-CでOM‑1 Mark IIを接続してください",
 )
 
@@ -182,9 +183,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun openUsbConnectionGuide() {
+        val device = usbManager.deviceList.values.firstOrNull(::isOm1MarkII)
         mutableState.update {
             it.copy(
                 showConnectionGuide = true,
+                usbCableAssessment = device?.let(::assessUsbCableForDevice),
                 statusMessage = "カメラ側で「0 RAW/Control」を選んでから接続してください",
             )
         }
@@ -206,7 +209,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
             return
         }
-        mutableState.update { it.copy(showConnectionGuide = false) }
+        mutableState.update {
+            it.copy(
+                showConnectionGuide = false,
+                usbCableAssessment = assessUsbCableForDevice(device),
+            )
+        }
         requestUsbPermissionOrConnect(device)
     }
 
@@ -576,6 +584,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         mutableState.update {
             it.copy(
                 showConnectionGuide = true,
+                usbCableAssessment = assessUsbCableForDevice(device),
                 statusMessage = "USBを検出しました。カメラ側で「0 RAW/Control」を選択してください",
             )
         }
@@ -1131,6 +1140,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 exposureSyncActive = false,
                 isCapturing = false,
                 liveViewIssue = null,
+                usbCableAssessment = null,
                 statusMessage = "USBが切断されました。既に保存済みのファイルは保持されています",
             )
         }
@@ -1138,6 +1148,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun isOm1MarkII(device: UsbDevice): Boolean =
         device.vendorId == Ptp.OM1_MARK_II_VENDOR_ID && device.productId == Ptp.OM1_MARK_II_PRODUCT_ID
+
+    private fun assessUsbCableForDevice(device: UsbDevice): UsbCableAssessment {
+        val bulkPacketSizes = (0 until device.interfaceCount)
+            .map(device::getInterface)
+            .flatMap { usbInterface ->
+                (0 until usbInterface.endpointCount)
+                    .map(usbInterface::getEndpoint)
+                    .filter { it.type == android.hardware.usb.UsbConstants.USB_ENDPOINT_XFER_BULK }
+                    .map { it.maxPacketSize }
+            }
+        return assessUsbCable(bulkPacketSizes)
+    }
 
     override fun onCleared() {
         runCatching { appContext.unregisterReceiver(usbReceiver) }
