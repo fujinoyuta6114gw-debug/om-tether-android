@@ -95,6 +95,7 @@ class OmUsbCameraController(
             val infoData = activeTransport.execute(
                 code = Ptp.GET_DEVICE_INFO,
                 transactionIdOverride = 0L,
+                transferTimeoutMs = PTP_SESSION_TRANSFER_TIMEOUT_MS,
             ).data
                 ?: throw PtpException(message = "GetDeviceInfo returned no dataset")
             val info = PtpDatasetParser.deviceInfo(infoData)
@@ -107,15 +108,15 @@ class OmUsbCameraController(
                 parameters = listOf(1L),
                 acceptedResponses = setOf(Ptp.RESPONSE_OK, Ptp.RESPONSE_SESSION_ALREADY_OPEN),
                 transactionIdOverride = 0L,
+                transferTimeoutMs = PTP_SESSION_TRANSFER_TIMEOUT_MS,
             )
             sessionOpen = true
 
-            initializePcMode(info)
-            // Exposure descriptors and the first card baseline are intentionally deferred.
-            // Both can be slow on an OM body while it is entering PC mode. The first
-            // decodable live-view frame is delivered before either background task starts.
+            // PC/live-view properties, exposure descriptors, and the first card baseline
+            // are intentionally deferred. RAW/Control mode can take a few seconds to
+            // settle after OpenSession; it must not keep the setup guide in CONNECTING.
             endpointSet.interruptIn?.let(::startEventReader)
-            log.add("Exposure/card initialization deferred until after the first live-view frame")
+            log.add("PC/live-view, exposure, and card initialization deferred")
             return CameraSession(
                 identity = CameraIdentity(
                     manufacturer = info.manufacturer,
@@ -140,6 +141,7 @@ class OmUsbCameraController(
             throw PtpException(message = "Camera did not advertise ${Ptp.hex16(Ptp.OMD_GET_LIVE_VIEW_IMAGE)}")
         }
         val forceRestart = forceLiveViewRestart
+        initializePcMode(info)
         initializeLiveViewMode(info, forceRestart)
         forceLiveViewRestart = false
         liveViewJob = scope.launch {
@@ -636,7 +638,12 @@ class OmUsbCameraController(
 
     private suspend fun initializePcMode(info: PtpDeviceInfo) {
         val descriptor = if (Ptp.PROP_PC_MODE in info.properties) {
-            runCatching { getDescriptor(Ptp.PROP_PC_MODE) }
+            runCatching {
+                getDescriptor(
+                    Ptp.PROP_PC_MODE,
+                    CONTROL_PROPERTY_TRANSFER_TIMEOUT_MS,
+                )
+            }
                 .onFailure { log.add("PC mode descriptor unavailable: ${it.message}") }
                 .getOrNull()
         } else {
@@ -654,6 +661,7 @@ class OmUsbCameraController(
             setKnownPropertyWhenReady(
                 propertyCode = Ptp.PROP_PC_MODE,
                 value = PtpScalar(Ptp.TYPE_UINT16, 1L),
+                transferTimeoutMs = CONTROL_PROPERTY_TRANSFER_TIMEOUT_MS,
             )
         }.onSuccess {
             log.add("PC mode enabled through ${Ptp.hex16(Ptp.PROP_PC_MODE)}")
@@ -665,7 +673,12 @@ class OmUsbCameraController(
 
     private suspend fun initializeLiveViewMode(info: PtpDeviceInfo, forceRestart: Boolean) {
         val descriptor = if (Ptp.PROP_LIVE_VIEW_MODE in info.properties) {
-            runCatching { getDescriptor(Ptp.PROP_LIVE_VIEW_MODE) }
+            runCatching {
+                getDescriptor(
+                    Ptp.PROP_LIVE_VIEW_MODE,
+                    CONTROL_PROPERTY_TRANSFER_TIMEOUT_MS,
+                )
+            }
                 .onFailure { log.add("Live-view descriptor unavailable: ${it.message}") }
                 .getOrNull()
         } else {
@@ -681,6 +694,7 @@ class OmUsbCameraController(
                 setKnownPropertyWhenReady(
                     propertyCode = Ptp.PROP_LIVE_VIEW_MODE,
                     value = PtpScalar(Ptp.TYPE_UINT32, 0L),
+                    transferTimeoutMs = CONTROL_PROPERTY_TRANSFER_TIMEOUT_MS,
                 )
             }.onSuccess {
                 log.add("Live-view property cleared for recovery")
@@ -697,6 +711,7 @@ class OmUsbCameraController(
             setKnownPropertyWhenReady(
                 propertyCode = Ptp.PROP_LIVE_VIEW_MODE,
                 value = PtpScalar(Ptp.TYPE_UINT32, Ptp.LIVE_VIEW_ENABLED_VALUE),
+                transferTimeoutMs = CONTROL_PROPERTY_TRANSFER_TIMEOUT_MS,
             )
         }.onSuccess {
             log.add("Live-view property set to ${Ptp.hex32(Ptp.LIVE_VIEW_ENABLED_VALUE)}")
@@ -729,7 +744,11 @@ class OmUsbCameraController(
         delay(PTP_RESET_SETTLE_MS)
     }
 
-    private suspend fun setKnownPropertyWhenReady(propertyCode: Int, value: PtpScalar) {
+    private suspend fun setKnownPropertyWhenReady(
+        propertyCode: Int,
+        value: PtpScalar,
+        transferTimeoutMs: Int = PtpUsbTransport.DEFAULT_TRANSFER_TIMEOUT_MS,
+    ) {
         var lastBusy: PtpException? = null
         repeat(PROPERTY_WRITE_ATTEMPTS) { attempt ->
             try {
@@ -737,6 +756,7 @@ class OmUsbCameraController(
                     code = Ptp.SET_DEVICE_PROP_VALUE,
                     parameters = listOf(propertyCode.toLong()),
                     outgoingData = value.encode(),
+                    transferTimeoutMs = transferTimeoutMs,
                 )
                 return
             } catch (error: PtpException) {
@@ -1217,6 +1237,8 @@ class OmUsbCameraController(
         private const val USB_CONTROL_TIMEOUT_MS = 2_000
         private const val PTP_RESET_SETTLE_MS = 300L
         private const val LIVE_VIEW_RESTART_SETTLE_MS = 180L
+        private const val PTP_SESSION_TRANSFER_TIMEOUT_MS = 8_000
+        private const val CONTROL_PROPERTY_TRANSFER_TIMEOUT_MS = 3_000
         private const val LIVE_VIEW_TRANSFER_TIMEOUT_MS = 3_000
         private const val CAPTURE_TIMEOUT_MS = 12_000L
         private const val COMPANION_OBJECT_WAIT_MS = 2_500L

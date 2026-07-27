@@ -636,29 +636,36 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     statusMessage = if (demo) "デモモード — カメラへ命令は送信しません" else "OM‑1 Mark IIへ接続しています…",
                 )
             }
-            var connectionTimedOut = false
+            var ptpConnectionTimedOut = false
+            var firstFrameTimedOut = false
+            val ptpConnectionReady = CompletableDeferred<Unit>()
             val firstFrameReady = CompletableDeferred<Unit>()
-            val connectionTimeoutJob = if (demo) {
+            val ptpConnectionTimeoutJob = if (demo) {
                 null
             } else {
                 viewModelScope.launch {
-                    delay(CONNECTION_TIMEOUT_MS)
+                    delay(PTP_CONNECTION_TIMEOUT_MS)
                     if (
                         controller === newController &&
-                        firstFrameReady.completeExceptionally(
-                            IllegalStateException("First live-view frame timed out"),
+                        ptpConnectionReady.completeExceptionally(
+                            IllegalStateException("PTP session timed out"),
                         )
                     ) {
-                        connectionTimedOut = true
-                        // Keep the timeout armed through live-view property setup and the
-                        // first successfully decoded JPEG. Closing UsbDeviceConnection is
-                        // what releases a blocking Android bulkTransfer.
+                        ptpConnectionTimedOut = true
+                        // Closing UsbDeviceConnection releases a blocking Android
+                        // bulkTransfer even when coroutine cancellation cannot.
                         newController.forceClose()
                     }
                 }
             }
+            var firstFrameTimeoutJob: Job? = null
             try {
                 val session = newController.connect()
+                ptpConnectionReady.complete(Unit)
+                ptpConnectionTimeoutJob?.cancel()
+                // If the watchdog won the race, do not continue with a connection that
+                // returned only because forceClose() released its blocked USB transfer.
+                ptpConnectionReady.await()
                 if (!demo) realCameraConnectedOnce = true
                 val generation = frameGeneration
                 frameCollectionJob = viewModelScope.launch {
@@ -689,11 +696,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                                 while (
                                     controller === newController &&
                                     generation == frameGeneration &&
-                                    mutableState.value.phase == ConnectionPhase.CONNECTING
+                                    appInForeground &&
+                                    !firstFrameReady.isCompleted
                                 ) {
                                     // Preserve a body-shutter event that arrives while the
-                                    // first JPEG is still being decoded. Connection timeout
-                                    // or controller replacement cancels this job.
+                                    // first JPEG is still being decoded. A timeout, leaving
+                                    // the foreground, or controller replacement ends the wait.
                                     delay(EXTERNAL_CAPTURE_BUSY_RETRY_MS)
                                 }
                                 while (
@@ -706,7 +714,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                                 if (
                                     controller === newController &&
                                     generation == frameGeneration &&
-                                    mutableState.value.phase == ConnectionPhase.CONNECTED
+                                    mutableState.value.phase == ConnectionPhase.CONNECTED &&
+                                    mutableState.value.liveBitmap != null
                                 ) {
                                     beginCaptureTransfer(newController, cameraSideShutter = true)
                                 }
@@ -716,23 +725,37 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 mutableState.update {
                     it.copy(
-                        phase = if (demo) ConnectionPhase.DEMO else ConnectionPhase.CONNECTING,
+                        phase = if (demo) ConnectionPhase.DEMO else ConnectionPhase.CONNECTED,
                         identity = session.identity,
                         exposureControls = session.exposureControls,
                         exposureSyncActive = false,
                         statusMessage = if (demo) {
                             "デモモード — USB接続で実機へ切り替えられます"
                         } else {
-                            "ライブビューを開始しています…"
+                            "USB/PTP接続完了 — ライブビューを開始しています…"
                         },
                     )
                 }
                 if (appInForeground) {
                     liveViewStartedAt = SystemClock.elapsedRealtime()
+                    if (!demo) {
+                        firstFrameTimeoutJob = viewModelScope.launch {
+                            delay(FIRST_FRAME_TIMEOUT_MS)
+                            if (
+                                controller === newController &&
+                                firstFrameReady.completeExceptionally(
+                                    IllegalStateException("First live-view frame timed out"),
+                                )
+                            ) {
+                                firstFrameTimedOut = true
+                                newController.forceClose()
+                            }
+                        }
+                    }
                     newController.startLiveView()
                     if (!demo) {
                         firstFrameReady.await()
-                        connectionTimeoutJob?.cancel()
+                        firstFrameTimeoutJob?.cancel()
                         mutableState.update {
                             it.copy(
                                 phase = ConnectionPhase.CONNECTED,
@@ -747,7 +770,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         startExposureSync(newController, generation)
                     }
                 } else if (!demo) {
-                    connectionTimeoutJob?.cancel()
                     mutableState.update {
                         it.copy(
                             phase = ConnectionPhase.CONNECTED,
@@ -756,7 +778,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     }
                 }
             } catch (error: CancellationException) {
-                connectionTimeoutJob?.cancel()
+                ptpConnectionTimeoutJob?.cancel()
+                firstFrameTimeoutJob?.cancel()
                 frameCollectionJob?.cancel()
                 frameCollectionJob = null
                 externalCaptureEventJob?.cancel()
@@ -768,7 +791,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 if (controller === newController) controller = null
                 throw error
             } catch (error: Throwable) {
-                connectionTimeoutJob?.cancel()
+                ptpConnectionTimeoutJob?.cancel()
+                firstFrameTimeoutJob?.cancel()
                 frameCollectionJob?.cancel()
                 frameCollectionJob = null
                 externalCaptureEventJob?.cancel()
@@ -793,10 +817,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         exposureControls = emptyList(),
                         exposureSyncActive = false,
                         liveViewIssue = null,
-                        statusMessage = if (connectionTimedOut) {
-                            "接続が30秒でタイムアウトしました。0 RAW/Controlを確認してUSBを接続し直してください"
-                        } else {
-                            "接続エラー: ${error.userMessage()}"
+                        statusMessage = when {
+                            ptpConnectionTimedOut ->
+                                "USB/PTP初期化が15秒でタイムアウトしました。0 RAW/Controlを確認してUSBを接続し直してください"
+                            firstFrameTimedOut ->
+                                "USB/PTP接続は完了しましたが、ライブビューが20秒で開始しませんでした。「再接続」を押してください"
+                            else -> "接続エラー: ${error.userMessage()}"
                         },
                     )
                 }
@@ -1171,7 +1197,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         private const val EXPOSURE_SYNC_INTERVAL_MS = 1_800L
         private const val EXTERNAL_CAPTURE_DEBOUNCE_MS = 650L
         private const val EXTERNAL_CAPTURE_BUSY_RETRY_MS = 250L
-        private const val CONNECTION_TIMEOUT_MS = 30_000L
+        private const val PTP_CONNECTION_TIMEOUT_MS = 15_000L
+        private const val FIRST_FRAME_TIMEOUT_MS = 20_000L
         private const val CONTROLLER_SHUTDOWN_TIMEOUT_MS = 1_500L
         private const val USB_REOPEN_SETTLE_MS = 150L
         private const val LIVE_PREVIEW_MAX_DIMENSION = 1_024

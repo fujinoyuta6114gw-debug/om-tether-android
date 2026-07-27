@@ -1,6 +1,17 @@
 # Build and verification record
 
-確認日: 2026-07-26
+確認日: 2026-07-27
+
+## v0.3.5 RAW/Control接続判定の分離
+
+- PTPの`GetDeviceInfo`／`OpenSession`完了を、撮影前ガイドのUSB接続確認条件へ変更
+- PC mode `0xD052` とLiveView mode `0xD06D` の初期化を`startLiveView()`へ移動
+- PTP接続15秒と最初の正常JPEGデコード20秒を別々のウォッチドッグで監視
+- PTPセッション命令を8秒、ライブビュー初期化用プロパティ命令を3秒へ制限
+- 最初の正常JPEG受信前に本体シャッター転送を開始しない条件を追加
+- 構造検証で、`connect()`がPC mode初期化を待たないことと、PTP接続完了が初回JPEG待機より先に通知されることを確認
+
+v0.3.5は構造検証、JVM単体テスト、APK生成後、実機で「RAW/Control選択後にガイド3/6を通過」「初回ライブビュー」「停止後の再接続」「本体シャッターJPEG／RAW」を確認します。
 
 ## v0.3.4 初回フレーム・本体シャッター安全経路
 

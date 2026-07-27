@@ -46,6 +46,9 @@ def main() -> int:
     camera_source = (
         APP_SOURCE / "java" / "com" / "example" / "omtether" / "camera" / "OmUsbCameraController.kt"
     ).read_text(encoding="utf-8")
+    view_model_source = (
+        APP_SOURCE / "java" / "com" / "example" / "omtether" / "MainViewModel.kt"
+    ).read_text(encoding="utf-8")
     connect_source = camera_source.split("override suspend fun connect(): CameraSession", 1)[1].split(
         "override suspend fun startLiveView()", 1
     )[0]
@@ -94,9 +97,10 @@ def main() -> int:
         "camera-side shutter event flow": "externalCaptureEvents",
         "camera-side shutter import": "importExternalCapture",
         "dual-card new-object watcher": "Camera-side shutter safety polling started after first live-view frame",
-        "bounded initial USB connection": "CONNECTION_TIMEOUT_MS",
+        "bounded initial USB connection": "PTP_CONNECTION_TIMEOUT_MS",
+        "bounded first live-view frame": "FIRST_FRAME_TIMEOUT_MS",
         "first decoded frame connection gate": "firstFrameReady.await()",
-        "deferred exposure and card setup": "Exposure/card initialization deferred until after the first live-view frame",
+        "deferred PC and live-view setup": "PC/live-view, exposure, and card initialization deferred",
         "bounded card safety polling": "OBJECT_WATCH_TRANSFER_TIMEOUT_MS",
         "pre-baseline companion grouping": "coherentCaptureBatch",
         "retained failure diagnostics": "lastDiagnosticsText",
@@ -128,6 +132,18 @@ def main() -> int:
     require(
         "readExposureControls()" not in connect_source,
         "connect() must not read exposure descriptors before the initial live view can start",
+    )
+    require(
+        "initializePcMode(" not in connect_source,
+        "connect() must not wait for PC-mode property setup before confirming the PTP session",
+    )
+    activate_source = view_model_source.split(
+        "private suspend fun activateController", 1
+    )[1].split("private suspend fun updateFrame", 1)[0]
+    require(
+        activate_source.index("phase = if (demo) ConnectionPhase.DEMO else ConnectionPhase.CONNECTED")
+        < activate_source.index("firstFrameReady.await()"),
+        "the setup guide must receive PTP-connected state before waiting for the first live-view frame",
     )
 
     print(f"PASS: {len(xml_files)} XML files parsed")

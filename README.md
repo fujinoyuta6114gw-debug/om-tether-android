@@ -1,4 +1,4 @@
-# OM Tether for Android — USB-C prototype v0.3.4
+# OM Tether for Android — USB-C prototype v0.3.5
 
 OM SYSTEM OM‑1 Mark IIをAndroid端末からUSB-Cでテザー撮影するための、非公式の試作アプリです。撮影現場で必要になる表示・保存・画像確認を先に実装し、カメラ固有のUSB応答は診断ログで追える構成にしています。
 
@@ -15,6 +15,14 @@ OM SYSTEM OM‑1 Mark IIをAndroid端末からUSB-Cでテザー撮影するた�
 - カメラなしでUIとJPEG保存を確認できるデモモード
 - USBトランザクションとカメラ能力をコピーできる診断画面
 - 初回起動時の撮影前ガイド（端末設定、USB接続、グレーカード判定、表示微調整）
+
+## v0.3.5のRAW/Control接続ガイド修正
+
+- `GetDeviceInfo` と `OpenSession` が成功した時点でUSB/PTP接続完了とし、撮影前ガイドの「次へ」を有効化
+- PC modeとLiveView modeのプロパティ初期化をPTP接続判定から分離し、カメラのモード切替待ちでガイド全体が止まらないよう変更
+- USB/PTPセッションは15秒、最初のライブビューJPEGは20秒の独立したタイムアウトで監視
+- 初期化用プロパティのUSB応答にも3秒の上限を設け、無応答時は診断を残して次の復旧経路へ移行
+- 最初のライブビューが表示されるまでは、カメラ本体シャッターの自動転送を開始しないよう保護
 
 ## v0.3.4のライブビュー・本体シャッター修正
 
@@ -145,7 +153,7 @@ OM SYSTEM OM‑1 Mark IIをAndroid端末からUSB-Cでテザー撮影するた�
 
 ### GitHub ActionsでAPKを作る
 
-`.github/workflows/build-apk.yml` を同梱しています。GitHubの `main` ブランチへ配置すると、ソース検証、JVM単体テスト、debug APK生成を自動実行します。成功時の成果物名は `OM-Tether-v0.3.4-debug` で、中に `app-debug.apk` が入ります。
+`.github/workflows/build-apk.yml` を同梱しています。GitHubの `main` ブランチへ配置すると、ソース検証、JVM単体テスト、debug APK生成を自動実行します。成功時の成果物名は `OM-Tether-v0.3.5-debug` で、中に `app-debug.apk` が入ります。
 
 このAPKは初期動作確認用のdebugビルドです。Google Play配布用のrelease署名APKではありません。
 
