@@ -607,8 +607,8 @@ class OmUsbCameraController(
             val bytes = requiredTransport().execute(
                 Ptp.GET_DEVICE_PROP_VALUE,
                 parameters = listOf(Ptp.PROP_CAPTURE_TARGET.toLong()),
-            ).data ?: return
-            if (bytes.size >= 2) {
+            ).data
+            if (bytes != null && bytes.size >= 2) {
                 val target = PtpCursor(bytes).scalar(Ptp.TYPE_UINT16).raw
                 log.add("Capture target ${Ptp.hex16(Ptp.PROP_CAPTURE_TARGET)}=${Ptp.hex32(target)}")
             }
