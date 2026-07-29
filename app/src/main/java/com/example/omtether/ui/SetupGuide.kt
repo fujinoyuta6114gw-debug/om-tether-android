@@ -201,14 +201,12 @@ internal fun UsbConnectionGuide(
                 ConnectionStep(2, "USB-CデータケーブルでAndroidと直結")
                 ConnectionStep(3, "カメラの電源をON")
                 ConnectionStep(4, "カメラ画面で［0 RAW/Control］を選択し、OK")
-                ConnectionStep(5, "画質とカード1/2の振り分け設定を確認")
-                Notice("カード1＝RAW／カード2＝JPEGでもOK。スマホ側の保存形式は撮影画面で選べます。")
                 UsbCableNotice(cableAssessment)
-                Notice(
-                    "選択画面が出ない場合：MENU → e → 3. モニター/音/接続 → USBの設定 → " +
-                        "USB接続モード → 毎回確認",
+                Text(
+                    "カード振り分けやUSB設定場所などは、撮影画面の「！ TIPS」で確認できます。",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontSize = 12.sp,
                 )
-                Notice("USB PD／ストレージ／MTP／ウェブカメラは選ばないでください。", warning = true)
                 Text(
                     "現在：$statusMessage",
                     color = MaterialTheme.colorScheme.onSurfaceVariant,

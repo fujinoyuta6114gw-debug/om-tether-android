@@ -102,6 +102,7 @@ fun OmTetherApp(
     diagnostics: () -> String,
 ) {
     var diagnosticsText by remember { mutableStateOf<String?>(null) }
+    var showTips by remember { mutableStateOf(false) }
     Surface(
         modifier = Modifier.fillMaxSize(),
         color = MaterialTheme.colorScheme.background,
@@ -111,7 +112,7 @@ fun OmTetherApp(
                 state = state,
                 onUsbConnect = onUsbConnect,
                 onDemo = onDemo,
-                onSetupGuide = onOpenSetupGuide,
+                onTips = { showTips = true },
                 onDiagnostics = { diagnosticsText = diagnostics() },
             )
             StatusLine(
@@ -207,6 +208,21 @@ fun OmTetherApp(
         )
     }
 
+    if (showTips) {
+        TipsDialog(
+            state = state,
+            onOpenSetupGuide = {
+                showTips = false
+                onOpenSetupGuide()
+            },
+            onOpenConnectionGuide = {
+                showTips = false
+                onUsbConnect()
+            },
+            onDismiss = { showTips = false },
+        )
+    }
+
     diagnosticsText?.let { text ->
         DiagnosticsDialog(
             text = text,
@@ -220,7 +236,7 @@ private fun AppHeader(
     state: MainUiState,
     onUsbConnect: () -> Unit,
     onDemo: () -> Unit,
-    onSetupGuide: () -> Unit,
+    onTips: () -> Unit,
     onDiagnostics: () -> Unit,
 ) {
     val canSwitchController = !state.isCapturing &&
@@ -239,8 +255,13 @@ private fun AppHeader(
             Spacer(Modifier.width(10.dp))
             PhaseChip(state.phase)
             Spacer(Modifier.weight(1f))
-            TextButton(onClick = onSetupGuide) { Text("撮影前ガイド") }
-            TextButton(onClick = onDiagnostics) { Text("診断") }
+            TextButton(onClick = onTips, contentPadding = PaddingValues(horizontal = 7.dp)) {
+                Text("！ TIPS", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+            }
+            TextButton(
+                onClick = onDiagnostics,
+                contentPadding = PaddingValues(horizontal = 7.dp),
+            ) { Text("診断", fontSize = 12.sp) }
         }
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
@@ -502,18 +523,6 @@ private fun ControlPanel(
                     modifier = Modifier.weight(1f),
                 )
             }
-            Text(
-                text = when (state.phoneSaveFormat) {
-                    PhoneSaveFormat.JPEG ->
-                        "本体シャッターも自動転送。フルJPEG優先"
-                    PhoneSaveFormat.RAW ->
-                        "本体シャッターも自動転送。カード1/2からORFを保存"
-                },
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                fontSize = 9.sp,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
             Row(
                 modifier = Modifier.fillMaxWidth().weight(1f),
                 horizontalArrangement = Arrangement.spacedBy(10.dp),
@@ -708,6 +717,85 @@ private fun Histogram(histogram: IntArray, modifier: Modifier = Modifier) {
                 strokeWidth = max(1f, barWidth),
             )
         }
+    }
+}
+
+@Composable
+private fun TipsDialog(
+    state: MainUiState,
+    onOpenSetupGuide: () -> Unit,
+    onOpenConnectionGuide: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("！ TIPS") },
+        text = {
+            Column(
+                modifier = Modifier.fillMaxWidth().heightIn(max = 520.dp).verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(14.dp),
+            ) {
+                TipSection(
+                    title = "USB接続",
+                    body = "カメラで［0 RAW/Control］を選択します。USB PD／ストレージ／MTP／ウェブカメラではテザー撮影できません。",
+                )
+                TipSection(
+                    title = "接続が切れたとき",
+                    body = "カードアクセスランプが消えていることを確認し、画面の「再接続」を押してください。直らない場合はカメラの電源を入れ直し、0 RAW/Controlを選び直します。",
+                )
+                TipSection(
+                    title = "スマホへの保存",
+                    body = when (state.phoneSaveFormat) {
+                        PhoneSaveFormat.JPEG ->
+                            "現在はJPEG保存です。カード1/2にあるフルJPEGを優先し、ない場合だけRAW内プレビューを利用します。"
+                        PhoneSaveFormat.RAW ->
+                            "現在はRAW保存です。カード1/2からORFを探してスマホの専用日付フォルダへ保存します。"
+                    },
+                )
+                TipSection(
+                    title = "カメラのカード設定",
+                    body = "カード1＝RAW／カード2＝JPEGなど、カメラ側の振り分けは変更しません。アプリは両方のカードを確認します。",
+                )
+                TipSection(
+                    title = "ケーブル",
+                    body = state.usbCableAssessment?.let { "${it.title}。${it.detail}" }
+                        ?: "USB 3.x対応のデータ通信ケーブルで、ハブを挟まず直結することを推奨します。",
+                )
+                TipSection(
+                    title = "露出と表示",
+                    body = "絞り・シャッター速度・ISOはカメラから読んだ対応値だけを表示します。画面の色合わせは「撮影前ガイド」で調整できます。",
+                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    OutlinedButton(
+                        onClick = onOpenConnectionGuide,
+                        modifier = Modifier.weight(1f),
+                    ) { Text("接続手順") }
+                    OutlinedButton(
+                        onClick = onOpenSetupGuide,
+                        modifier = Modifier.weight(1f),
+                    ) { Text("撮影前ガイド") }
+                }
+            }
+        },
+        confirmButton = {
+            Button(onClick = onDismiss) { Text("閉じる") }
+        },
+    )
+}
+
+@Composable
+private fun TipSection(title: String, body: String) {
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Text(title, fontWeight = FontWeight.Bold)
+        Text(
+            body,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            fontSize = 12.sp,
+            lineHeight = 18.sp,
+        )
     }
 }
 
