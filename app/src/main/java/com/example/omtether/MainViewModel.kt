@@ -17,6 +17,7 @@ import androidx.lifecycle.viewModelScope
 import com.example.omtether.camera.CameraController
 import com.example.omtether.camera.CameraIdentity
 import com.example.omtether.camera.CameraTransferProgress
+import com.example.omtether.camera.DownloadedObject
 import com.example.omtether.camera.ExposureControl
 import com.example.omtether.camera.ExternalCaptureQueueProgress
 import com.example.omtether.camera.MockCameraController
@@ -26,6 +27,10 @@ import com.example.omtether.camera.Ptp
 import com.example.omtether.camera.PtpScalar
 import com.example.omtether.image.ImageAnalysis
 import com.example.omtether.image.NeutralPatchResult
+import com.example.omtether.history.CameraStorageSlot
+import com.example.omtether.history.CaptureHistoryItem
+import com.example.omtether.history.PhotoMetadataExtractor
+import com.example.omtether.history.SmartphoneSaveState
 import com.example.omtether.storage.CaptureStorage
 import com.example.omtether.storage.SavedObject
 import kotlinx.coroutines.CancellationException
@@ -109,6 +114,8 @@ data class MainUiState(
     val saveProgress: SaveProgress? = null,
     val captureQueue: CaptureQueueState = CaptureQueueState(),
     val lastCapture: LastCapture? = null,
+    val captureHistory: List<CaptureHistoryItem> = emptyList(),
+    val selectedHistoryId: String? = null,
     val showConnectionGuide: Boolean = true,
     val showSetupGuide: Boolean = false,
     val setupStep: Int = 0,
@@ -154,6 +161,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var appInForeground = true
     private var recoverPtpAfterPermission = false
     private var realCameraConnectedOnce = false
+    private var captureHistorySequence = 0L
     @Volatile
     private var lastDiagnosticsText = "OM Tether ${BuildConfig.VERSION_NAME}\nCamera controller has not been activated."
 
@@ -257,6 +265,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         beginCaptureTransfer(requestedController, cameraSideShutter = false)
     }
 
+    fun selectCaptureHistory(id: String?) {
+        mutableState.update { current ->
+            if (id == null || current.captureHistory.any { it.id == id }) {
+                current.copy(selectedHistoryId = id)
+            } else {
+                current
+            }
+        }
+    }
+
     private fun beginCaptureTransfer(
         requestedController: CameraController,
         cameraSideShutter: Boolean,
@@ -342,7 +360,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     val onPreview: suspend (ByteArray) -> Unit = { jpeg ->
                         if (controller === requestedController) showCaptureReview(jpeg)
                     }
-                    val onObject: suspend (com.example.omtether.camera.DownloadedObject) -> Unit = { item ->
+                    val onObject: suspend (DownloadedObject) -> Unit = { item ->
+                        val historyId = if (controller === requestedController) {
+                            addPendingCaptureHistory(item)
+                        } else {
+                            null
+                        }
                         try {
                             publishProgress(
                                 stage = SaveProgressStage.WRITING,
@@ -370,6 +393,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                                 },
                             )
                             saved += result
+                            historyId?.let { id ->
+                                updateCaptureHistory(id) { historyItem ->
+                                    historyItem.copy(
+                                        smartphoneSaveState = SmartphoneSaveState.SAVED,
+                                        savedRelativePath = result.relativePath,
+                                        savedUri = result.uri.toString(),
+                                        saveFailure = null,
+                                    )
+                                }
+                            }
                             if (controller === requestedController) {
                                 mutableState.update {
                                     it.copy(
@@ -381,10 +414,26 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                                 }
                             }
                         } catch (error: CancellationException) {
+                            historyId?.let { id ->
+                                updateCaptureHistory(id) { historyItem ->
+                                    historyItem.copy(
+                                        smartphoneSaveState = SmartphoneSaveState.FAILED,
+                                        saveFailure = "保存が中断されました",
+                                    )
+                                }
+                            }
                             throw error
                         } catch (error: Throwable) {
                             failures += "${item.filename}: ${error.userMessage()}"
                             queueFailureReported = true
+                            historyId?.let { id ->
+                                updateCaptureHistory(id) { historyItem ->
+                                    historyItem.copy(
+                                        smartphoneSaveState = SmartphoneSaveState.FAILED,
+                                        saveFailure = error.userMessage(),
+                                    )
+                                }
+                            }
                             if (controller === requestedController) {
                                 mutableState.update {
                                     it.copy(
@@ -514,6 +563,52 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     }
                 }
             }
+        }
+    }
+
+    private fun addPendingCaptureHistory(item: DownloadedObject): String {
+        val extracted = PhotoMetadataExtractor.extract(item)
+        val historyId = buildString {
+            append("capture-")
+            append(SystemClock.elapsedRealtimeNanos())
+            append('-')
+            append(++captureHistorySequence)
+        }
+        val cardSlot = CameraStorageSlot.fromStorageId(item.storageId)
+        val historyItem = CaptureHistoryItem(
+            id = historyId,
+            filename = item.filename,
+            thumbnail = extracted.thumbnail,
+            metadata = extracted.metadata,
+            fileFormat = PhotoMetadataExtractor.fileFormat(item),
+            isPreviewFallback = item.isPreviewFallback,
+            sourceStorageId = item.storageId,
+            sourceCardSlot = cardSlot,
+            smartphoneSaveState = SmartphoneSaveState.SAVING,
+            metadataWarning = extracted.warning,
+        )
+        mutableState.update { current ->
+            val retained = (listOf(historyItem) + current.captureHistory)
+                .take(MAX_CAPTURE_HISTORY_ITEMS)
+            current.copy(
+                captureHistory = retained,
+                selectedHistoryId = current.selectedHistoryId
+                    ?.takeIf { selectedId -> retained.any { it.id == selectedId } },
+            )
+        }
+        return historyId
+    }
+
+    private fun updateCaptureHistory(
+        id: String,
+        transform: (CaptureHistoryItem) -> CaptureHistoryItem,
+    ) {
+        mutableState.update { current ->
+            val index = current.captureHistory.indexOfFirst { it.id == id }
+            if (index < 0) return@update current
+            val updated = current.captureHistory.toMutableList()
+            updated[index] = transform(updated[index])
+            current.copy(captureHistory = updated)
         }
     }
 
@@ -1415,6 +1510,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         private const val USB_REOPEN_SETTLE_MS = 150L
         private const val LIVE_PREVIEW_MAX_DIMENSION = 1_024
         private const val CAPTURE_PREVIEW_MAX_DIMENSION = 2_048
+        private const val MAX_CAPTURE_HISTORY_ITEMS = 20
         private const val PREFERENCES_NAME = "display_calibration"
         private const val KEY_SETUP_COMPLETE = "setup_complete"
         private const val KEY_TEMPERATURE = "temperature"

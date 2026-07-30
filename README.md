@@ -1,4 +1,4 @@
-# OM Tether for Android — USB-C prototype v0.4.0
+# OM Tether for Android — USB-C prototype v0.5.0
 
 OM SYSTEM OM‑1 Mark IIをAndroid端末からUSB-Cでテザー撮影するための、非公式の試作アプリです。撮影現場で必要になる表示・保存・画像確認を先に実装し、カメラ固有のUSB応答は診断ログで追える構成にしています。
 
@@ -10,11 +10,23 @@ OM SYSTEM OM‑1 Mark IIをAndroid端末からUSB-Cでテザー撮影するた�
 - アプリ／カメラ本体どちらのシャッターでも撮影を検出し、Androidへ保存する形式（JPEGまたはRAW）を選択
 - カメラのカード1／カード2を横断したJPEG／ORFオブジェクト取得
 - Androidの `Pictures/OM Tether/yyyy-MM-dd` への自動保存
+- 直近20枚のサムネイル履歴と、保存対象JPEG／ORF本体から読み取った撮影EXIFの詳細表示
 - ライブビューのピンチ拡大、輝度ヒストグラム、白飛び警告オーバーレイ
 - 絞り・シャッター・ISO・露出補正・ホワイトバランスの列挙値読み取り、定期同期、変更
 - カメラなしでUIとJPEG保存を確認できるデモモード
 - USBトランザクションとカメラ能力をコピーできる診断画面
 - 初回起動時の撮影前ガイド（端末設定、USB接続、グレーカード判定、表示微調整）
+
+## v0.5.0の撮影履歴・実EXIF
+
+- 撮影画面の下部に、アプリ起動中の直近20枚を新しい順で表示
+- サムネイルを選ぶと、F値、シャッター速度、ISO、露出補正、焦点距離、撮影時刻、JPEG／ORF、カード1／2、スマホ保存状態を表示
+- 露出値はカメラの現在設定で補完せず、Androidへ保存するJPEG／ORFそのもののEXIFだけを使用
+- EXIFがないプレビューJPEGでは値を推測せず `—` とし、撮影時刻だけPTP ObjectInfoを使った場合は明記
+- PTP StorageIDを撮影ファイルへ保持し、既知の物理ストレージ番号だけをカード1／2として表示
+- 保存中、保存済み、保存失敗を履歴ごとに更新し、失敗した写真も履歴から消さず確認可能
+- ORFのカメラ内プレビューを履歴サムネイルへ引き継ぎ、RAW本体は履歴メモリへ保持しない
+- 履歴サムネイルを長辺240px・RGB_565へ制限し、20枚を超えた古い項目を破棄
 
 ## v0.4.0の撮影キュー
 
@@ -200,7 +212,7 @@ OM SYSTEM OM‑1 Mark IIをAndroid端末からUSB-Cでテザー撮影するた�
 
 ### GitHub ActionsでAPKを作る
 
-`.github/workflows/build-apk.yml` を同梱しています。GitHubの `main` ブランチへ配置すると、ソース検証、JVM単体テスト、debug APK生成を自動実行します。成功時の成果物名は `OM-Tether-v0.4.0-debug` で、中に `app-debug.apk` が入ります。
+`.github/workflows/build-apk.yml` を同梱しています。GitHubの `main` ブランチへ配置すると、ソース検証、JVM単体テスト、debug APK生成を自動実行します。成功時の成果物名は `OM-Tether-v0.5.0-debug` で、中に `app-debug.apk` が入ります。
 
 このAPKは初期動作確認用のdebugビルドです。Google Play配布用のrelease署名APKではありません。
 
@@ -215,6 +227,8 @@ Pictures/OM Tether/2026-07-23/P7230001.ORF
 ```
 
 「スマホにJPEG」では両カードからフルJPEGを探します。カメラがRAWしか生成していない場合は `P7230001_PREVIEW.JPG` のような名前でRAWのプレビューJPEGを代替保存し、画面に画質制限を表示します。「スマホにRAW」では両カードからORFを探して無加工で保存します。AndroidがORFを標準表示できない場合でも、ファイル本体は保持されます。
+
+撮影履歴は現在のアプリ起動中に受信した直近20枚です。履歴の露出値は保存対象ファイルのEXIFを読み、ファイルに記録されていない値をライブビュー中の現在設定から推測しません。アプリを終了しても保存済みJPEG／ORFは上記フォルダに残りますが、履歴一覧自体は次回起動時に空の状態から始まります。
 
 デモモードは実機RAWを生成できないため、RAW選択時も警告付きのJPEGサンプルを保存します。実機撮影では選択形式を別形式へ黙って置き換えません。カメラ内の画像はどちらの選択でも削除・変更しません。
 
@@ -240,6 +254,7 @@ Pictures/OM Tether/2026-07-23/P7230001.ORF
 - [OM Capture 機能](https://software.omsystem.com/omcapture/en/features.html)
 - [OM‑1 Mark II USB接続モード説明](https://learning.omsystem.com/OM-1MarkII/zz_html_manual/en/usb_settings_251.html)
 - [Android USB host API](https://developer.android.com/develop/connectivity/usb/host)
+- [AndroidX ExifInterface](https://developer.android.com/reference/androidx/exifinterface/media/ExifInterface)
 - [libgphoto2ソースとリリース情報](https://github.com/gphoto/libgphoto2)
 
 プロトコル上の採用値と出典は [docs/PROTOCOL_NOTES.md](docs/PROTOCOL_NOTES.md) に分離しています。

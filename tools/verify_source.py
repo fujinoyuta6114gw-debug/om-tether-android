@@ -25,11 +25,15 @@ def main() -> int:
         APP_SOURCE / "java" / "com" / "example" / "omtether" / "SetupGuidePolicy.kt",
         APP_SOURCE / "java" / "com" / "example" / "omtether" / "UsbCableAssessment.kt",
         APP_SOURCE / "java" / "com" / "example" / "omtether" / "camera" / "OmUsbCameraController.kt",
+        APP_SOURCE / "java" / "com" / "example" / "omtether" / "history" / "CaptureHistory.kt",
+        APP_SOURCE / "java" / "com" / "example" / "omtether" / "history" / "PhotoMetadataExtractor.kt",
         APP_SOURCE / "java" / "com" / "example" / "omtether" / "storage" / "CapturePathPolicy.kt",
         APP_SOURCE / "java" / "com" / "example" / "omtether" / "ui" / "OmTetherApp.kt",
         ROOT / "app" / "src" / "test" / "java" / "com" / "example" / "omtether" / "SetupGuidePolicyTest.kt",
         ROOT / "app" / "src" / "test" / "java" / "com" / "example" / "omtether" / "camera" / "CaptureSavePolicyTest.kt",
         ROOT / "app" / "src" / "test" / "java" / "com" / "example" / "omtether" / "camera" / "CameraObjectTrackerTest.kt",
+        ROOT / "app" / "src" / "test" / "java" / "com" / "example" / "omtether" / "history" / "CameraStorageSlotTest.kt",
+        ROOT / "app" / "src" / "test" / "java" / "com" / "example" / "omtether" / "history" / "PhotoMetadataFormatterTest.kt",
         ROOT / "app" / "src" / "test" / "java" / "com" / "example" / "omtether" / "storage" / "CapturePathPolicyTest.kt",
     ]
     for path in required_files:
@@ -115,6 +119,11 @@ def main() -> int:
         "bounded queue drain": "MAX_HANDLES_PER_QUEUE_DRAIN",
         "capture queue UI": "CaptureQueueIndicator",
         "off-main capture transfer": "viewModelScope.launch(Dispatchers.IO)",
+        "actual file EXIF extraction": "ExifInterface(ByteArrayInputStream(item.bytes))",
+        "bounded capture history": "MAX_CAPTURE_HISTORY_ITEMS = 20",
+        "capture history strip": "CaptureHistoryStrip",
+        "camera card source tracking": "CameraStorageSlot.fromStorageId",
+        "history save failure state": "SmartphoneSaveState.FAILED",
     }
     for label, marker in required_markers.items():
         require(marker in kotlin_source, f"missing implementation marker: {label}")
@@ -143,6 +152,13 @@ def main() -> int:
     require(
         "readExposureControls()" not in connect_source,
         "connect() must not read exposure descriptors before the initial live view can start",
+    )
+    history_source = (
+        APP_SOURCE / "java" / "com" / "example" / "omtether" / "history" / "PhotoMetadataExtractor.kt"
+    ).read_text(encoding="utf-8")
+    require(
+        "ExposureControl" not in history_source and "exposureControls" not in history_source,
+        "capture history must not substitute the camera's current exposure controls for file EXIF",
     )
     require(
         "initializePcMode(" not in connect_source,

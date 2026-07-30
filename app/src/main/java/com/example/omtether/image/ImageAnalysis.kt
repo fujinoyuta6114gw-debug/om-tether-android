@@ -22,7 +22,11 @@ data class NeutralPatchResult(
 )
 
 object ImageAnalysis {
-    fun decodeJpeg(bytes: ByteArray, maxDimension: Int = 2_048): Bitmap? {
+    fun decodeJpeg(
+        bytes: ByteArray,
+        maxDimension: Int = 2_048,
+        preferredConfig: Bitmap.Config = Bitmap.Config.ARGB_8888,
+    ): Bitmap? {
         if (bytes.isEmpty()) return null
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
@@ -33,7 +37,7 @@ object ImageAnalysis {
         }
         val options = BitmapFactory.Options().apply {
             inSampleSize = sampleSize
-            inPreferredConfig = Bitmap.Config.ARGB_8888
+            inPreferredConfig = preferredConfig
         }
         return BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options)
     }

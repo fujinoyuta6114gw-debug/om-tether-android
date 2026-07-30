@@ -30,6 +30,7 @@ class MainActivity : ComponentActivity() {
                     onRestartLiveView = viewModel::restartLiveView,
                     onDemo = viewModel::startDemo,
                     onCapture = viewModel::capture,
+                    onCaptureHistorySelect = viewModel::selectCaptureHistory,
                     onPhoneSaveFormatChange = viewModel::setPhoneSaveFormat,
                     onExposureChange = viewModel::setExposure,
                     onHighlightEnabled = viewModel::setHighlightEnabled,

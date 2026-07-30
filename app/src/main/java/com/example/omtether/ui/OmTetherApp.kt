@@ -5,6 +5,7 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -24,6 +25,7 @@ import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
@@ -60,6 +62,7 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -76,6 +79,11 @@ import com.example.omtether.camera.ExposureControl
 import com.example.omtether.camera.ExposureFormatter
 import com.example.omtether.camera.PhoneSaveFormat
 import com.example.omtether.camera.PtpScalar
+import com.example.omtether.history.CameraStorageSlot
+import com.example.omtether.history.CaptureHistoryItem
+import com.example.omtether.history.CaptureTimeSource
+import com.example.omtether.history.PhotoMetadataFormatter
+import com.example.omtether.history.SmartphoneSaveState
 import com.example.omtether.storage.CapturePathPolicy
 import java.util.Locale
 import kotlin.math.max
@@ -90,6 +98,7 @@ fun OmTetherApp(
     onRestartLiveView: () -> Unit,
     onDemo: () -> Unit,
     onCapture: () -> Unit,
+    onCaptureHistorySelect: (String?) -> Unit,
     onPhoneSaveFormatChange: (PhoneSaveFormat) -> Unit,
     onExposureChange: (Int, PtpScalar) -> Unit,
     onHighlightEnabled: (Boolean) -> Unit,
@@ -180,10 +189,20 @@ fun OmTetherApp(
                             onExposureChange = onExposureChange,
                             onHighlightEnabled = onHighlightEnabled,
                             onHighlightThreshold = onHighlightThreshold,
-                            modifier = Modifier.fillMaxWidth().heightIn(min = 340.dp, max = 400.dp),
+                            modifier = Modifier.fillMaxWidth().heightIn(min = 320.dp, max = 380.dp),
                         )
                     }
                 }
+            }
+            if (state.captureHistory.isNotEmpty()) {
+                CaptureHistoryStrip(
+                    history = state.captureHistory,
+                    selectedId = state.selectedHistoryId,
+                    onSelect = { onCaptureHistorySelect(it.id) },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 10.dp, vertical = 6.dp),
+                )
             }
         }
     }
@@ -233,6 +252,15 @@ fun OmTetherApp(
             onDismiss = { diagnosticsText = null },
         )
     }
+
+    state.selectedHistoryId
+        ?.let { selectedId -> state.captureHistory.firstOrNull { it.id == selectedId } }
+        ?.let { selected ->
+            CaptureHistoryDetailDialog(
+                item = selected,
+                onDismiss = { onCaptureHistorySelect(null) },
+            )
+        }
 }
 
 @Composable
@@ -466,6 +494,285 @@ private fun previewColorFilter(calibration: DisplayCalibration): ColorFilter? {
             ),
         ),
     )
+}
+
+@Composable
+private fun CaptureHistoryStrip(
+    history: List<CaptureHistoryItem>,
+    selectedId: String?,
+    onSelect: (CaptureHistoryItem) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Surface(
+        modifier = modifier.height(94.dp),
+        shape = RoundedCornerShape(12.dp),
+        color = MaterialTheme.colorScheme.surface,
+        tonalElevation = 2.dp,
+    ) {
+        Column(
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp),
+            verticalArrangement = Arrangement.spacedBy(5.dp),
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    "撮影履歴",
+                    modifier = Modifier.weight(1f),
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Bold,
+                )
+                Text(
+                    "直近 ${history.size}/20枚 · タップで実EXIF",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontSize = 10.sp,
+                )
+            }
+            LazyRow(
+                horizontalArrangement = Arrangement.spacedBy(7.dp),
+                contentPadding = PaddingValues(end = 4.dp),
+            ) {
+                items(history, key = CaptureHistoryItem::id) { item ->
+                    CaptureHistoryThumbnail(
+                        item = item,
+                        selected = item.id == selectedId,
+                        onClick = { onSelect(item) },
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun CaptureHistoryThumbnail(
+    item: CaptureHistoryItem,
+    selected: Boolean,
+    onClick: () -> Unit,
+) {
+    val shape = RoundedCornerShape(8.dp)
+    val borderColor = if (selected) {
+        MaterialTheme.colorScheme.primary
+    } else {
+        MaterialTheme.colorScheme.outline.copy(alpha = 0.55f)
+    }
+    Box(
+        modifier = Modifier
+            .size(58.dp)
+            .clip(shape)
+            .background(Color(0xFF101214))
+            .border(if (selected) 2.dp else 1.dp, borderColor, shape)
+            .clickable(onClick = onClick),
+    ) {
+        item.thumbnail?.let { thumbnail ->
+            Image(
+                bitmap = thumbnail.asImageBitmap(),
+                contentDescription = "${item.filename}のサムネイル",
+                modifier = Modifier.fillMaxSize(),
+                contentScale = ContentScale.Crop,
+            )
+        } ?: Text(
+            text = PhotoMetadataFormatter.format(item.fileFormat, item.isPreviewFallback),
+            modifier = Modifier.align(Alignment.Center).padding(4.dp),
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            fontSize = 9.sp,
+        )
+        Surface(
+            modifier = Modifier.align(Alignment.BottomStart).padding(4.dp),
+            shape = RoundedCornerShape(4.dp),
+            color = Color(0xD9202327),
+        ) {
+            Text(
+                text = when (item.fileFormat) {
+                    com.example.omtether.history.CaptureFileFormat.JPEG -> "JPG"
+                    com.example.omtether.history.CaptureFileFormat.ORF -> "ORF"
+                    com.example.omtether.history.CaptureFileFormat.UNKNOWN -> "?"
+                },
+                modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp),
+                fontSize = 8.sp,
+                fontWeight = FontWeight.Bold,
+            )
+        }
+        Surface(
+            modifier = Modifier.align(Alignment.TopEnd).padding(4.dp),
+            shape = CircleShape,
+            color = when (item.smartphoneSaveState) {
+                SmartphoneSaveState.SAVING -> Color(0xFFB7B2A8)
+                SmartphoneSaveState.SAVED -> Color(0xFF8FB39C)
+                SmartphoneSaveState.FAILED -> Color(0xFFC58E8E)
+            },
+        ) {
+            Text(
+                text = when (item.smartphoneSaveState) {
+                    SmartphoneSaveState.SAVING -> "…"
+                    SmartphoneSaveState.SAVED -> "✓"
+                    SmartphoneSaveState.FAILED -> "!"
+                },
+                modifier = Modifier.padding(horizontal = 5.dp, vertical = 1.dp),
+                color = Color(0xFF101214),
+                fontSize = 9.sp,
+                fontWeight = FontWeight.Black,
+            )
+        }
+        item.sourceCardSlot?.let { slot ->
+            Surface(
+                modifier = Modifier.align(Alignment.BottomEnd).padding(4.dp),
+                shape = RoundedCornerShape(4.dp),
+                color = Color(0xD9202327),
+            ) {
+                Text(
+                    "C$slot",
+                    modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp),
+                    fontSize = 8.sp,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun CaptureHistoryDetailDialog(
+    item: CaptureHistoryItem,
+    onDismiss: () -> Unit,
+) {
+    val metadata = item.metadata
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                Text("撮影詳細")
+                Text(
+                    item.filename,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontSize = 12.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+        },
+        text = {
+            Column(
+                modifier = Modifier.fillMaxWidth().verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Surface(
+                    modifier = Modifier.fillMaxWidth().height(150.dp),
+                    color = Color.Black,
+                    shape = RoundedCornerShape(9.dp),
+                ) {
+                    item.thumbnail?.let { thumbnail ->
+                        Image(
+                            bitmap = thumbnail.asImageBitmap(),
+                            contentDescription = "${item.filename}の撮影画像",
+                            modifier = Modifier.fillMaxSize(),
+                            contentScale = ContentScale.Fit,
+                        )
+                    } ?: Box(contentAlignment = Alignment.Center) {
+                        Text(
+                            "サムネイルなし",
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            fontSize = 12.sp,
+                        )
+                    }
+                }
+                Surface(
+                    color = if (metadata.hasActualExif) {
+                        MaterialTheme.colorScheme.primary.copy(alpha = 0.14f)
+                    } else {
+                        MaterialTheme.colorScheme.error.copy(alpha = 0.12f)
+                    },
+                    shape = RoundedCornerShape(7.dp),
+                ) {
+                    Text(
+                        text = if (metadata.hasActualExif) {
+                            "保存対象ファイルから読み取った実EXIF"
+                        } else {
+                            "撮影EXIFを読み取れませんでした"
+                        },
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 9.dp, vertical = 7.dp),
+                        color = if (metadata.hasActualExif) {
+                            MaterialTheme.colorScheme.primary
+                        } else {
+                            MaterialTheme.colorScheme.error
+                        },
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                    )
+                }
+                HistoryDetailRow("F値", PhotoMetadataFormatter.aperture(metadata.apertureFNumber))
+                HistoryDetailRow(
+                    "シャッター",
+                    PhotoMetadataFormatter.exposureTime(metadata.exposureTimeSeconds),
+                )
+                HistoryDetailRow("ISO", PhotoMetadataFormatter.iso(metadata.iso))
+                HistoryDetailRow(
+                    "露出補正",
+                    PhotoMetadataFormatter.exposureBias(metadata.exposureBiasEv),
+                )
+                HistoryDetailRow(
+                    "焦点距離",
+                    PhotoMetadataFormatter.focalLength(metadata.focalLengthMm),
+                )
+                val timeSuffix = when (metadata.captureTimeSource) {
+                    CaptureTimeSource.EXIF -> ""
+                    CaptureTimeSource.PTP_OBJECT_INFO -> "（PTP情報）"
+                    CaptureTimeSource.UNAVAILABLE -> ""
+                }
+                HistoryDetailRow(
+                    "撮影時刻",
+                    PhotoMetadataFormatter.capturedAt(metadata.capturedAt) + timeSuffix,
+                )
+                HistoryDetailRow(
+                    "形式",
+                    PhotoMetadataFormatter.format(item.fileFormat, item.isPreviewFallback),
+                )
+                HistoryDetailRow(
+                    "保存元",
+                    CameraStorageSlot.label(item.sourceStorageId, item.sourceCardSlot),
+                )
+                HistoryDetailRow(
+                    "スマホ保存",
+                    PhotoMetadataFormatter.smartphoneSaveState(item),
+                )
+                item.metadataWarning?.let { warning ->
+                    Text(
+                        warning,
+                        color = MaterialTheme.colorScheme.error,
+                        fontSize = 10.sp,
+                    )
+                }
+                if (metadata.captureTimeSource == CaptureTimeSource.PTP_OBJECT_INFO) {
+                    Text(
+                        "撮影時刻のみPTPの画像情報を使用。露出値は現在のカメラ設定で補完していません。",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        fontSize = 10.sp,
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text("閉じる") }
+        },
+    )
+}
+
+@Composable
+private fun HistoryDetailRow(label: String, value: String) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.Top,
+    ) {
+        Text(
+            label,
+            modifier = Modifier.width(82.dp),
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            fontSize = 11.sp,
+        )
+        Text(
+            value,
+            modifier = Modifier.weight(1f),
+            fontSize = 12.sp,
+            fontWeight = FontWeight.Medium,
+        )
+    }
 }
 
 @Composable

@@ -193,6 +193,9 @@ data class DownloadedObject(
     val format: Int,
     val bytes: ByteArray,
     val previewJpeg: ByteArray? = null,
+    val storageId: Long? = null,
+    val captureDate: String? = null,
+    val isPreviewFallback: Boolean = false,
 )
 
 data class CameraTransferProgress(

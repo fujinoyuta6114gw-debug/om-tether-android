@@ -465,6 +465,9 @@ class OmUsbCameraController(
                                     filename = previewFilename(candidate.info.filename),
                                     format = CaptureSavePolicy.JPEG_OBJECT_FORMAT,
                                     bytes = thumbnail,
+                                    storageId = candidate.info.storageId,
+                                    captureDate = candidate.info.captureDate,
+                                    isPreviewFallback = true,
                                 )
                             }
                         }
@@ -486,6 +489,9 @@ class OmUsbCameraController(
                                         filename = previewFilename(rawCandidate.info.filename),
                                         format = CaptureSavePolicy.JPEG_OBJECT_FORMAT,
                                         bytes = preview,
+                                        storageId = rawCandidate.info.storageId,
+                                        captureDate = rawCandidate.info.captureDate,
+                                        isPreviewFallback = true,
                                     )
                                     break
                                 }
@@ -515,9 +521,9 @@ class OmUsbCameraController(
 
                 PhoneSaveFormat.RAW -> {
                     val rawCandidates = orderedCandidates(PhoneSaveFormat.RAW)
-                    rawCandidates.firstOrNull { it.info.thumbSize > 0L }
+                    val rawPreview = rawCandidates.firstOrNull { it.info.thumbSize > 0L }
                         ?.let { readObjectThumbnail(it) }
-                        ?.let { deliverPreview(it) }
+                    rawPreview?.let { deliverPreview(it) }
                     if (rawCandidates.isNotEmpty()) {
                         if (
                             !previewDelivered &&
@@ -529,7 +535,7 @@ class OmUsbCameraController(
                         for (candidate in rawCandidates) {
                             val item = downloadSelectedObject(candidate, warnings, onProgress)
                             if (item != null) {
-                                deliverObject(item)
+                                deliverObject(item.copy(previewJpeg = rawPreview))
                                 break
                             }
                         }
@@ -1174,7 +1180,14 @@ class OmUsbCameraController(
         }
         validateObjectBytes(candidate, bytes)
         val objectInfo = candidate.info
-        return DownloadedObject(candidate.handle, filename, objectInfo.format, bytes)
+        return DownloadedObject(
+            handle = candidate.handle,
+            filename = filename,
+            format = objectInfo.format,
+            bytes = bytes,
+            storageId = objectInfo.storageId,
+            captureDate = objectInfo.captureDate,
+        )
     }
 
     private suspend fun <T> retryObjectRead(label: String, block: suspend () -> T): T {
@@ -1218,7 +1231,13 @@ class OmUsbCameraController(
                 if (bytes != null) {
                     val filename = "OM_CAPTURE_${timestamp()}.JPG"
                     log.add("Using OMD GetImage fallback: ${bytes.size} B")
-                    return DownloadedObject(null, filename, CaptureSavePolicy.JPEG_OBJECT_FORMAT, bytes)
+                    return DownloadedObject(
+                        handle = null,
+                        filename = filename,
+                        format = CaptureSavePolicy.JPEG_OBJECT_FORMAT,
+                        bytes = bytes,
+                        isPreviewFallback = true,
+                    )
                 }
             } catch (error: PtpException) {
                 if (error.responseCode != Ptp.RESPONSE_DEVICE_BUSY) {
