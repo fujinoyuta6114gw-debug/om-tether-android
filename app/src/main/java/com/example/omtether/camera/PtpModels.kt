@@ -195,6 +195,12 @@ data class DownloadedObject(
     val previewJpeg: ByteArray? = null,
 )
 
+data class CameraTransferProgress(
+    val filename: String,
+    val bytesReceived: Long,
+    val totalBytes: Long,
+)
+
 data class CaptureObjectSummary(
     val handle: Long?,
     val filename: String,

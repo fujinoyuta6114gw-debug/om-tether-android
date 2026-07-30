@@ -16,6 +16,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.omtether.camera.CameraController
 import com.example.omtether.camera.CameraIdentity
+import com.example.omtether.camera.CameraTransferProgress
 import com.example.omtether.camera.ExposureControl
 import com.example.omtether.camera.MockCameraController
 import com.example.omtether.camera.OmUsbCameraController
@@ -82,6 +83,7 @@ data class MainUiState(
     val exposureSyncActive: Boolean = false,
     val phoneSaveFormat: PhoneSaveFormat = PhoneSaveFormat.JPEG,
     val isCapturing: Boolean = false,
+    val saveProgress: SaveProgress? = null,
     val lastCapture: LastCapture? = null,
     val showConnectionGuide: Boolean = true,
     val showSetupGuide: Boolean = false,
@@ -236,10 +238,37 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     ) {
         if (captureJob?.isActive == true || mutableState.value.isCapturing) return
         val requestedSaveFormat = mutableState.value.phoneSaveFormat
+        val progressEstimator = TransferProgressEstimator()
+        var lastProgressPublishedAt = 0L
+        var lastProgressKey: String? = null
+        fun publishProgress(
+            stage: SaveProgressStage,
+            filename: String,
+            completedBytes: Long,
+            totalBytes: Long,
+        ) {
+            if (controller !== requestedController) return
+            val now = SystemClock.elapsedRealtime()
+            val completed = totalBytes > 0L && completedBytes >= totalBytes
+            val progressKey = "${stage.name}:$filename"
+            val stageChanged = progressKey != lastProgressKey
+            if (!stageChanged && !completed && now - lastProgressPublishedAt < PROGRESS_UPDATE_INTERVAL_MS) return
+            lastProgressPublishedAt = now
+            lastProgressKey = progressKey
+            val progress = progressEstimator.update(
+                stage = stage,
+                filename = filename,
+                completedBytes = completedBytes,
+                totalBytes = totalBytes,
+                nowMs = now,
+            )
+            mutableState.update { it.copy(saveProgress = progress) }
+        }
         reviewJob?.cancel()
         mutableState.update {
             it.copy(
                 isCapturing = true,
+                saveProgress = SaveProgress(SaveProgressStage.PREPARING),
                 reviewBitmap = null,
                 reviewHighlightOverlay = null,
                 reviewHistogram = IntArray(256),
@@ -257,7 +286,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         captureJob = viewModelScope.launch {
             cameraOperationMutex.withLock {
                 if (controller !== requestedController) {
-                    mutableState.update { it.copy(isCapturing = false) }
+                    mutableState.update { it.copy(isCapturing = false, saveProgress = null) }
                     return@withLock
                 }
 
@@ -269,7 +298,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     }
                     val onObject: suspend (com.example.omtether.camera.DownloadedObject) -> Unit = { item ->
                         try {
-                            val result = storage.saveOne(item)
+                            publishProgress(
+                                stage = SaveProgressStage.WRITING,
+                                filename = item.filename,
+                                completedBytes = 0L,
+                                totalBytes = item.bytes.size.toLong(),
+                            )
+                            val result = storage.saveOne(item) { bytesWritten, totalBytes ->
+                                publishProgress(
+                                    stage = SaveProgressStage.WRITING,
+                                    filename = item.filename,
+                                    completedBytes = bytesWritten,
+                                    totalBytes = totalBytes,
+                                )
+                            }
                             saved += result
                             if (controller === requestedController) {
                                 mutableState.update {
@@ -286,12 +328,28 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         requestedController.importExternalCapture(
                             phoneSaveFormat = requestedSaveFormat,
                             onPreview = onPreview,
+                            onProgress = { progress: CameraTransferProgress ->
+                                publishProgress(
+                                    stage = SaveProgressStage.DOWNLOADING,
+                                    filename = progress.filename,
+                                    completedBytes = progress.bytesReceived,
+                                    totalBytes = progress.totalBytes,
+                                )
+                            },
                             onObject = onObject,
                         )
                     } else {
                         requestedController.capture(
                             phoneSaveFormat = requestedSaveFormat,
                             onPreview = onPreview,
+                            onProgress = { progress: CameraTransferProgress ->
+                                publishProgress(
+                                    stage = SaveProgressStage.DOWNLOADING,
+                                    filename = progress.filename,
+                                    completedBytes = progress.bytesReceived,
+                                    totalBytes = progress.totalBytes,
+                                )
+                            },
                             onObject = onObject,
                         )
                     }
@@ -340,7 +398,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         if (requestedController !is MockCameraController && appInForeground) {
                             liveViewStartedAt = SystemClock.elapsedRealtime()
                         }
-                        mutableState.update { it.copy(isCapturing = false) }
+                        mutableState.update { it.copy(isCapturing = false, saveProgress = null) }
                         scheduleReviewClear()
                     }
                 }
@@ -640,6 +698,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     exposureControls = emptyList(),
                     exposureSyncActive = false,
                     isCapturing = false,
+                    saveProgress = null,
                     showConnectionGuide = false,
                     liveViewIssue = null,
                     statusMessage = if (demo) "デモモード — カメラへ命令は送信しません" else "OM‑1 Mark IIへ接続しています…",
@@ -1139,6 +1198,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 exposureControls = emptyList(),
                 exposureSyncActive = false,
                 isCapturing = false,
+                saveProgress = null,
                 liveViewIssue = null,
                 usbCableAssessment = null,
                 statusMessage = "USBが切断されました。既に保存済みのファイルは保持されています",
@@ -1229,6 +1289,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         private const val PTP_CONNECTION_TIMEOUT_MS = 15_000L
         private const val FIRST_FRAME_TIMEOUT_MS = 20_000L
         private const val CONTROLLER_SHUTDOWN_TIMEOUT_MS = 1_500L
+        private const val PROGRESS_UPDATE_INTERVAL_MS = 100L
         private const val USB_REOPEN_SETTLE_MS = 150L
         private const val LIVE_PREVIEW_MAX_DIMENSION = 1_024
         private const val CAPTURE_PREVIEW_MAX_DIMENSION = 2_048

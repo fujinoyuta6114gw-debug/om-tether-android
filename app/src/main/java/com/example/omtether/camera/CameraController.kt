@@ -13,11 +13,13 @@ interface CameraController {
     suspend fun capture(
         phoneSaveFormat: PhoneSaveFormat,
         onPreview: suspend (ByteArray) -> Unit,
+        onProgress: (CameraTransferProgress) -> Unit,
         onObject: suspend (DownloadedObject) -> Unit,
     ): CaptureReport
     suspend fun importExternalCapture(
         phoneSaveFormat: PhoneSaveFormat,
         onPreview: suspend (ByteArray) -> Unit,
+        onProgress: (CameraTransferProgress) -> Unit,
         onObject: suspend (DownloadedObject) -> Unit,
     ): CaptureReport
     suspend fun refreshExposureControls(): List<ExposureControl>

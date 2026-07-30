@@ -43,6 +43,7 @@ class PtpUsbTransport(
         acceptedResponses: Set<Int> = setOf(Ptp.RESPONSE_OK),
         transactionIdOverride: Long? = null,
         transferTimeoutMs: Int = DEFAULT_TRANSFER_TIMEOUT_MS,
+        onDataProgress: ((bytesReceived: Long, totalBytes: Long) -> Unit)? = null,
     ): PtpResult = transactionMutex.withLock {
         require(transferTimeoutMs > 0) { "transferTimeoutMs must be positive" }
         withContext(Dispatchers.IO) {
@@ -56,7 +57,11 @@ class PtpUsbTransport(
 
             var incomingData: ByteArray? = null
             repeat(MAX_CONTAINERS_PER_TRANSACTION) {
-                val container = readContainer(transferTimeoutMs)
+                val container = readContainer(
+                    transferTimeoutMs = transferTimeoutMs,
+                    expectedTransactionId = transactionId,
+                    onDataProgress = onDataProgress,
+                )
                 if (container.type == Ptp.CONTAINER_EVENT) {
                     log.add("! event ${Ptp.hex16(container.code)} params=${container.payload.size / 4}")
                     return@repeat
@@ -119,7 +124,11 @@ class PtpUsbTransport(
         }
     }
 
-    private fun readContainer(transferTimeoutMs: Int): PtpContainer {
+    private fun readContainer(
+        transferTimeoutMs: Int,
+        expectedTransactionId: Long,
+        onDataProgress: ((bytesReceived: Long, totalBytes: Long) -> Unit)?,
+    ): PtpContainer {
         while (pending.size < 12) pending += readChunk(READ_CHUNK_BYTES, transferTimeoutMs)
         val length = try {
             PtpCodec.declaredLength(pending)
@@ -149,6 +158,10 @@ class PtpUsbTransport(
         }
 
         var offset = fromPending
+        val reportProgress = type == Ptp.CONTAINER_DATA && transactionId == expectedTransactionId
+        if (payloadLength > 0 && reportProgress) {
+            onDataProgress?.invoke(offset.toLong(), payloadLength.toLong())
+        }
         while (offset < payloadLength) {
             val chunk = readChunk(
                 min(READ_CHUNK_BYTES, payloadLength - offset),
@@ -157,6 +170,9 @@ class PtpUsbTransport(
             val usable = min(chunk.size, payloadLength - offset)
             chunk.copyInto(payload, destinationOffset = offset, endIndex = usable)
             offset += usable
+            if (reportProgress) {
+                onDataProgress?.invoke(offset.toLong(), payloadLength.toLong())
+            }
             if (chunk.size > usable) pending += chunk.copyOfRange(usable, chunk.size)
         }
         return PtpContainer(type, code, transactionId, payload)

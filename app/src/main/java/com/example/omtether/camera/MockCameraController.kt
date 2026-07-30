@@ -61,6 +61,7 @@ class MockCameraController : CameraController {
     override suspend fun capture(
         phoneSaveFormat: PhoneSaveFormat,
         onPreview: suspend (ByteArray) -> Unit,
+        onProgress: (CameraTransferProgress) -> Unit,
         onObject: suspend (DownloadedObject) -> Unit,
     ): CaptureReport {
         val bytes = renderJpeg(frameNumber++, captured = true)
@@ -68,6 +69,7 @@ class MockCameraController : CameraController {
         log.add("Demo capture created: $filename (${bytes.size} B)")
         val downloaded = DownloadedObject(null, filename, 0x3801, bytes)
         onPreview(bytes)
+        onProgress(CameraTransferProgress(filename, bytes.size.toLong(), bytes.size.toLong()))
         onObject(downloaded)
         return CaptureReport(
             objects = listOf(CaptureObjectSummary(null, filename, 0x3801, bytes.size)),
@@ -82,6 +84,7 @@ class MockCameraController : CameraController {
     override suspend fun importExternalCapture(
         phoneSaveFormat: PhoneSaveFormat,
         onPreview: suspend (ByteArray) -> Unit,
+        onProgress: (CameraTransferProgress) -> Unit,
         onObject: suspend (DownloadedObject) -> Unit,
     ): CaptureReport = throw PtpException(message = "Demo camera has no physical shutter events")
 

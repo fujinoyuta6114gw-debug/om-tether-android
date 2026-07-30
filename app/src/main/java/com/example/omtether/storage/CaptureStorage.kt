@@ -20,11 +20,17 @@ data class SavedObject(
 )
 
 class CaptureStorage(private val context: Context) {
-    suspend fun saveOne(item: DownloadedObject): SavedObject = withContext(Dispatchers.IO) {
-        saveOneBlocking(item)
+    suspend fun saveOne(
+        item: DownloadedObject,
+        onProgress: (bytesWritten: Long, totalBytes: Long) -> Unit = { _, _ -> },
+    ): SavedObject = withContext(Dispatchers.IO) {
+        saveOneBlocking(item, onProgress)
     }
 
-    private fun saveOneBlocking(item: DownloadedObject): SavedObject {
+    private fun saveOneBlocking(
+        item: DownloadedObject,
+        onProgress: (bytesWritten: Long, totalBytes: Long) -> Unit,
+    ): SavedObject {
         require(item.bytes.isNotEmpty()) { "Refusing to save an empty camera object" }
         val resolver = context.contentResolver
         val filename = safeFilename(item.filename)
@@ -47,7 +53,14 @@ class CaptureStorage(private val context: Context) {
             ?: error("MediaStore could not create $filename")
         try {
             resolver.openOutputStream(uri, "w")?.use { output ->
-                output.write(item.bytes)
+                var offset = 0
+                onProgress(0L, item.bytes.size.toLong())
+                while (offset < item.bytes.size) {
+                    val length = minOf(WRITE_CHUNK_BYTES, item.bytes.size - offset)
+                    output.write(item.bytes, offset, length)
+                    offset += length
+                    onProgress(offset.toLong(), item.bytes.size.toLong())
+                }
                 output.flush()
             } ?: error("MediaStore could not open $filename")
             val publishedRows = resolver.update(
@@ -87,5 +100,9 @@ class CaptureStorage(private val context: Context) {
         "jpg", "jpeg" -> "image/jpeg"
         "orf" -> "image/x-olympus-orf"
         else -> "application/octet-stream"
+    }
+
+    private companion object {
+        const val WRITE_CHUNK_BYTES = 256 * 1024
     }
 }

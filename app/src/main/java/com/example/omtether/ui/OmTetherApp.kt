@@ -36,6 +36,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Slider
@@ -68,6 +69,8 @@ import androidx.compose.ui.layout.ContentScale
 import com.example.omtether.ConnectionPhase
 import com.example.omtether.DisplayCalibration
 import com.example.omtether.MainUiState
+import com.example.omtether.SaveProgress
+import com.example.omtether.SaveProgressStage
 import com.example.omtether.camera.ExposureControl
 import com.example.omtether.camera.ExposureFormatter
 import com.example.omtether.camera.PhoneSaveFormat
@@ -523,6 +526,9 @@ private fun ControlPanel(
                     modifier = Modifier.weight(1f),
                 )
             }
+            state.saveProgress?.let { progress ->
+                SaveProgressIndicator(progress)
+            }
             Row(
                 modifier = Modifier.fillMaxWidth().weight(1f),
                 horizontalArrangement = Arrangement.spacedBy(10.dp),
@@ -632,6 +638,89 @@ private fun ControlPanel(
             }
         }
     }
+}
+
+@Composable
+private fun SaveProgressIndicator(progress: SaveProgress) {
+    val title = when (progress.stage) {
+        SaveProgressStage.PREPARING -> "撮影データを確認しています…"
+        SaveProgressStage.DOWNLOADING -> "カメラから転送中"
+        SaveProgressStage.WRITING -> "スマホへ保存中"
+    }
+    val fraction = progress.fraction
+    Surface(
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        shape = RoundedCornerShape(8.dp),
+    ) {
+        Column(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 7.dp),
+            verticalArrangement = Arrangement.spacedBy(5.dp),
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(title, modifier = Modifier.weight(1f), fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                if (fraction != null) {
+                    Text(
+                        "${(fraction * 100f).toInt()}%",
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                    )
+                    progress.remainingSeconds?.let { seconds ->
+                        Text(
+                            " · 残り約${formatRemainingTime(seconds)}",
+                            fontSize = 10.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+            }
+            if (fraction == null) {
+                LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+            } else {
+                LinearProgressIndicator(
+                    progress = { fraction },
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+            if (progress.totalBytes > 0L) {
+                Text(
+                    buildString {
+                        progress.filename?.takeIf { it.isNotBlank() }?.let {
+                            append(it)
+                            append(" · ")
+                        }
+                        append(formatBytes(progress.completedBytes))
+                        append(" / ")
+                        append(formatBytes(progress.totalBytes))
+                        progress.bytesPerSecond?.let {
+                            append(" · ")
+                            append(formatBytes(it))
+                            append("/秒")
+                        }
+                    },
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    fontSize = 9.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+    }
+}
+
+private fun formatRemainingTime(seconds: Int): String = when {
+    seconds < 60 -> "${seconds}秒"
+    seconds < 60 * 60 -> "${seconds / 60}分${seconds % 60}秒"
+    else -> "${seconds / 3600}時間${(seconds % 3600) / 60}分"
+}
+
+private fun formatBytes(bytes: Long): String = when {
+    bytes >= 1024L * 1024L * 1024L ->
+        "%.1f GB".format(Locale.US, bytes / (1024.0 * 1024.0 * 1024.0))
+    bytes >= 1024L * 1024L ->
+        "%.1f MB".format(Locale.US, bytes / (1024.0 * 1024.0))
+    bytes >= 1024L ->
+        "%.1f KB".format(Locale.US, bytes / 1024.0)
+    else -> "$bytes B"
 }
 
 @Composable

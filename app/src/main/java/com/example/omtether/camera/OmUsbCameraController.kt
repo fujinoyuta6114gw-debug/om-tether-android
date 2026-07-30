@@ -200,14 +200,16 @@ class OmUsbCameraController(
     override suspend fun capture(
         phoneSaveFormat: PhoneSaveFormat,
         onPreview: suspend (ByteArray) -> Unit,
+        onProgress: (CameraTransferProgress) -> Unit,
         onObject: suspend (DownloadedObject) -> Unit,
     ): CaptureReport = cameraOperationMutex.withLock {
-        captureLocked(phoneSaveFormat, onPreview, onObject)
+        captureLocked(phoneSaveFormat, onPreview, onProgress, onObject)
     }
 
     private suspend fun captureLocked(
         phoneSaveFormat: PhoneSaveFormat,
         onPreview: suspend (ByteArray) -> Unit,
+        onProgress: (CameraTransferProgress) -> Unit,
         onObject: suspend (DownloadedObject) -> Unit,
     ): CaptureReport {
         val info = deviceInfo ?: throw PtpException(message = "Camera is not connected")
@@ -244,6 +246,7 @@ class OmUsbCameraController(
                 phoneSaveFormat = phoneSaveFormat,
                 sourceLabel = "App shutter",
                 onPreview = onPreview,
+                onProgress = onProgress,
                 onObject = onObject,
             )
         } finally {
@@ -258,6 +261,7 @@ class OmUsbCameraController(
     override suspend fun importExternalCapture(
         phoneSaveFormat: PhoneSaveFormat,
         onPreview: suspend (ByteArray) -> Unit,
+        onProgress: (CameraTransferProgress) -> Unit,
         onObject: suspend (DownloadedObject) -> Unit,
     ): CaptureReport = cameraOperationMutex.withLock {
         val info = deviceInfo ?: throw PtpException(message = "Camera is not connected")
@@ -275,6 +279,7 @@ class OmUsbCameraController(
                 phoneSaveFormat = phoneSaveFormat,
                 sourceLabel = "Camera shutter",
                 onPreview = onPreview,
+                onProgress = onProgress,
                 onObject = onObject,
             )
         } finally {
@@ -325,6 +330,7 @@ class OmUsbCameraController(
         phoneSaveFormat: PhoneSaveFormat,
         sourceLabel: String,
         onPreview: suspend (ByteArray) -> Unit,
+        onProgress: (CameraTransferProgress) -> Unit,
         onObject: suspend (DownloadedObject) -> Unit,
     ): CaptureReport {
         val warnings = mutableListOf<String>()
@@ -417,7 +423,7 @@ class OmUsbCameraController(
                             )
                         }
                     }
-                    val item = downloadSelectedObject(candidate, warnings)
+                    val item = downloadSelectedObject(candidate, warnings, onProgress)
                     if (item != null) {
                         extractJpeg(item.bytes)?.let { deliverPreview(it) }
                         deliverObject(item)
@@ -465,7 +471,7 @@ class OmUsbCameraController(
                         getCapturedJpegFallback()?.let { deliverPreview(it.bytes) }
                     }
                     for (candidate in rawCandidates) {
-                        val item = downloadSelectedObject(candidate, warnings)
+                        val item = downloadSelectedObject(candidate, warnings, onProgress)
                         if (item != null) {
                             deliverObject(item)
                             break
@@ -497,8 +503,9 @@ class OmUsbCameraController(
     private suspend fun downloadSelectedObject(
         candidate: ObjectCandidate,
         warnings: MutableList<String>,
+        onProgress: (CameraTransferProgress) -> Unit,
     ): DownloadedObject? = try {
-        downloadObject(candidate)
+        downloadObject(candidate, onProgress)
     } catch (error: CancellationException) {
         throw error
     } catch (error: Throwable) {
@@ -1064,16 +1071,28 @@ class OmUsbCameraController(
         }
     }
 
-    private suspend fun downloadObject(candidate: ObjectCandidate): DownloadedObject {
+    private suspend fun downloadObject(
+        candidate: ObjectCandidate,
+        onProgress: (CameraTransferProgress) -> Unit,
+    ): DownloadedObject {
+        val filename = candidate.info.filename.ifBlank { fallbackFilename(candidate.info.format) }
         val bytes = retryObjectRead("GetObject ${Ptp.hex32(candidate.handle)}") {
             requiredTransport().execute(
                 Ptp.GET_OBJECT,
                 parameters = listOf(candidate.handle),
+                onDataProgress = { bytesReceived, totalBytes ->
+                    onProgress(
+                        CameraTransferProgress(
+                            filename = filename,
+                            bytesReceived = bytesReceived,
+                            totalBytes = totalBytes,
+                        ),
+                    )
+                },
             ).data ?: throw PtpException(message = "GetObject returned no data")
         }
         validateObjectBytes(candidate, bytes)
         val objectInfo = candidate.info
-        val filename = objectInfo.filename.ifBlank { fallbackFilename(objectInfo.format) }
         return DownloadedObject(candidate.handle, filename, objectInfo.format, bytes)
     }
 
