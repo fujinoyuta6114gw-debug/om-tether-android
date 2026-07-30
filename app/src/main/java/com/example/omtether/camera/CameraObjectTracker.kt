@@ -83,7 +83,13 @@ internal class CameraObjectTracker {
     fun pendingCount(): Int = pending.size
 
     @Synchronized
-    fun takePending(): List<Long> = pending.toList().also { pending.clear() }
+    fun takePending(maxCount: Int = Int.MAX_VALUE): List<Long> {
+        require(maxCount >= 0)
+        if (maxCount == 0 || pending.isEmpty()) return emptyList()
+        val selected = pending.take(maxCount)
+        pending.removeAll(selected.toSet())
+        return selected
+    }
 
     companion object {
         private const val PRE_BASELINE_COMPANION_DISTANCE = 3L

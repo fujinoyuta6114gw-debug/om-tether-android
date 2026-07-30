@@ -201,6 +201,19 @@ data class CameraTransferProgress(
     val totalBytes: Long,
 )
 
+/**
+ * Live state for a camera-side capture queue.
+ *
+ * [waitingCaptures] excludes the item named by [activeFilename]. [failedDelta] is emitted
+ * only once when a capture batch cannot be transferred, so UI/session counters can safely
+ * accumulate failures without being reset by later updates.
+ */
+data class ExternalCaptureQueueProgress(
+    val waitingCaptures: Int,
+    val activeFilename: String? = null,
+    val failedDelta: Int = 0,
+)
+
 data class CaptureObjectSummary(
     val handle: Long?,
     val filename: String,
@@ -212,4 +225,5 @@ data class CaptureReport(
     val objects: List<CaptureObjectSummary>,
     val warnings: List<String> = emptyList(),
     val previewJpegFallbackUsed: Boolean = false,
+    val failedCaptureCount: Int = 0,
 )

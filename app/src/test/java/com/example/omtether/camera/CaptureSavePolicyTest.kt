@@ -121,6 +121,68 @@ class CaptureSavePolicyTest {
         )
     }
 
+    @Test
+    fun `burst is partitioned into every shutter release without dropping later frames`() {
+        val rawOne = objectInfo(
+            storageId = 0x0001_0001L,
+            filename = "P7260201.ORF",
+            format = 0x3000,
+            size = 24_000_000L,
+            captureDate = "20260726T120003",
+        )
+        val jpegOne = objectInfo(
+            storageId = 0x0002_0001L,
+            filename = "P7260201.JPG",
+            format = CaptureSavePolicy.JPEG_OBJECT_FORMAT,
+            size = 8_000_000L,
+            captureDate = "20260726T120003",
+        )
+        val rawTwo = objectInfo(
+            storageId = 0x0001_0001L,
+            filename = "P7260202.ORF",
+            format = 0x3000,
+            size = 24_100_000L,
+            captureDate = "20260726T120003",
+        )
+        val jpegTwo = objectInfo(
+            storageId = 0x0002_0001L,
+            filename = "P7260202.JPG",
+            format = CaptureSavePolicy.JPEG_OBJECT_FORMAT,
+            size = 8_100_000L,
+            captureDate = "20260726T120003",
+        )
+
+        assertEquals(
+            listOf(listOf(rawOne, jpegOne), listOf(rawTwo, jpegTwo)),
+            CaptureSavePolicy.partitionCaptureBatches(
+                listOf(rawOne, jpegOne, rawTwo, jpegTwo),
+            ),
+        )
+    }
+
+    @Test
+    fun `jpeg only burst in one timestamp stays as separate queue items`() {
+        val first = objectInfo(
+            storageId = 0x0002_0001L,
+            filename = "P7260301.JPG",
+            format = CaptureSavePolicy.JPEG_OBJECT_FORMAT,
+            size = 8_000_000L,
+            captureDate = "20260726T120004",
+        )
+        val second = objectInfo(
+            storageId = 0x0002_0001L,
+            filename = "P7260302.JPG",
+            format = CaptureSavePolicy.JPEG_OBJECT_FORMAT,
+            size = 8_100_000L,
+            captureDate = "20260726T120004",
+        )
+
+        assertEquals(
+            listOf(listOf(first), listOf(second)),
+            CaptureSavePolicy.partitionCaptureBatches(listOf(first, second)),
+        )
+    }
+
     private fun objectInfo(
         storageId: Long,
         filename: String,

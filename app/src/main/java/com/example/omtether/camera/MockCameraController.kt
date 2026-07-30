@@ -85,6 +85,7 @@ class MockCameraController : CameraController {
         phoneSaveFormat: PhoneSaveFormat,
         onPreview: suspend (ByteArray) -> Unit,
         onProgress: (CameraTransferProgress) -> Unit,
+        onQueueProgress: (ExternalCaptureQueueProgress) -> Unit,
         onObject: suspend (DownloadedObject) -> Unit,
     ): CaptureReport = throw PtpException(message = "Demo camera has no physical shutter events")
 

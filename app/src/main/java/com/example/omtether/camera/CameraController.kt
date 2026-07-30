@@ -20,6 +20,7 @@ interface CameraController {
         phoneSaveFormat: PhoneSaveFormat,
         onPreview: suspend (ByteArray) -> Unit,
         onProgress: (CameraTransferProgress) -> Unit,
+        onQueueProgress: (ExternalCaptureQueueProgress) -> Unit,
         onObject: suspend (DownloadedObject) -> Unit,
     ): CaptureReport
     suspend fun refreshExposureControls(): List<ExposureControl>
@@ -82,18 +83,62 @@ object CaptureSavePolicy {
      * winning the size-based save selection.
      */
     fun coherentCaptureBatch(candidates: List<PtpObjectInfo>): List<PtpObjectInfo> {
-        if (candidates.size < 2) return candidates
-        val anchor = candidates.first()
-        val anchorStem = filenameStem(anchor.filename)
-        if (anchorStem.isNotBlank()) {
-            val sameStem = candidates.filter { filenameStem(it.filename).equals(anchorStem, ignoreCase = true) }
-            if (sameStem.size > 1) return sameStem
+        return partitionCaptureBatches(candidates).firstOrNull().orEmpty()
+    }
+
+    /**
+     * Partitions a burst into shutter-release batches without dropping later images.
+     *
+     * Matching filename stems are authoritative and cover normal RAW/JPEG card splitting.
+     * Some dual-card configurations use different names, so one complementary RAW/JPEG
+     * object with the same PTP capture timestamp is paired as a fallback. Pairing at most
+     * one complementary stem avoids collapsing several burst frames created in one second.
+     */
+    fun partitionCaptureBatches(candidates: List<PtpObjectInfo>): List<List<PtpObjectInfo>> {
+        if (candidates.isEmpty()) return emptyList()
+        val remaining = candidates.toMutableList()
+        val batches = mutableListOf<List<PtpObjectInfo>>()
+
+        while (remaining.isNotEmpty()) {
+            val anchor = remaining.first()
+            val anchorStem = filenameStem(anchor.filename)
+            val batch = if (anchorStem.isBlank()) {
+                mutableListOf(anchor)
+            } else {
+                remaining
+                    .filter { filenameStem(it.filename).equals(anchorStem, ignoreCase = true) }
+                    .toMutableList()
+            }
+            if (batch.isEmpty()) batch += anchor
+
+            val hasJpeg = batch.any(::isJpeg)
+            val hasRaw = batch.any(::isRaw)
+            if (
+                anchor.captureDate.isNotBlank() &&
+                (!hasJpeg || !hasRaw)
+            ) {
+                val complementary = remaining.firstOrNull { candidate ->
+                    candidate !in batch &&
+                        candidate.captureDate == anchor.captureDate &&
+                        ((hasJpeg && isRaw(candidate)) || (hasRaw && isJpeg(candidate)))
+                }
+                if (complementary != null) {
+                    val companionStem = filenameStem(complementary.filename)
+                    if (companionStem.isBlank()) {
+                        batch += complementary
+                    } else {
+                        batch += remaining.filter {
+                            filenameStem(it.filename).equals(companionStem, ignoreCase = true)
+                        }
+                    }
+                }
+            }
+
+            val orderedBatch = candidates.filter { it in batch }
+            batches += orderedBatch
+            remaining.removeAll(orderedBatch.toSet())
         }
-        if (anchor.captureDate.isNotBlank()) {
-            val sameCaptureDate = candidates.filter { it.captureDate == anchor.captureDate }
-            if (sameCaptureDate.size > 1) return sameCaptureDate
-        }
-        return candidates
+        return batches
     }
 
     private fun filenameStem(filename: String): String =

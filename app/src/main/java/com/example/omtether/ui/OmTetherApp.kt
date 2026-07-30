@@ -67,6 +67,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.layout.ContentScale
 import com.example.omtether.ConnectionPhase
+import com.example.omtether.CaptureQueueState
 import com.example.omtether.DisplayCalibration
 import com.example.omtether.MainUiState
 import com.example.omtether.SaveProgress
@@ -502,7 +503,11 @@ private fun ControlPanel(
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text("撮影コントロール", fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
                 Text(
-                    if (state.exposureSyncActive) "本体撮影・同期中" else "本体撮影待機",
+                    when {
+                        state.captureQueue.isBusy -> "キュー処理中"
+                        state.exposureSyncActive -> "本体撮影・同期中"
+                        else -> "本体撮影待機"
+                    },
                     color = MaterialTheme.colorScheme.primary,
                     fontSize = 10.sp,
                 )
@@ -514,20 +519,23 @@ private fun ControlPanel(
                 SaveFormatChoice(
                     label = "スマホにJPEG",
                     selected = state.phoneSaveFormat == PhoneSaveFormat.JPEG,
-                    enabled = !state.isCapturing,
+                    enabled = !state.isCapturing && !state.captureQueue.isBusy,
                     onClick = { onPhoneSaveFormatChange(PhoneSaveFormat.JPEG) },
                     modifier = Modifier.weight(1f),
                 )
                 SaveFormatChoice(
                     label = "スマホにRAW",
                     selected = state.phoneSaveFormat == PhoneSaveFormat.RAW,
-                    enabled = !state.isCapturing,
+                    enabled = !state.isCapturing && !state.captureQueue.isBusy,
                     onClick = { onPhoneSaveFormatChange(PhoneSaveFormat.RAW) },
                     modifier = Modifier.weight(1f),
                 )
             }
             state.saveProgress?.let { progress ->
                 SaveProgressIndicator(progress)
+            }
+            if (state.captureQueue.hasActivity) {
+                CaptureQueueIndicator(state.captureQueue)
             }
             Row(
                 modifier = Modifier.fillMaxWidth().weight(1f),
@@ -550,7 +558,7 @@ private fun ControlPanel(
                     items(state.exposureControls, key = { it.propertyCode }) { control ->
                         ExposureRow(
                             control = control,
-                            enabled = !state.isCapturing,
+                            enabled = !state.isCapturing && !state.captureQueue.isBusy,
                             onExposureChange = onExposureChange,
                         )
                     }
@@ -617,7 +625,9 @@ private fun ControlPanel(
                 Spacer(Modifier.width(10.dp))
                 Button(
                     onClick = onCapture,
-                    enabled = !state.isCapturing && state.phase in setOf(ConnectionPhase.CONNECTED, ConnectionPhase.DEMO),
+                    enabled = !state.isCapturing &&
+                        !state.captureQueue.isBusy &&
+                        state.phase in setOf(ConnectionPhase.CONNECTED, ConnectionPhase.DEMO),
                     modifier = Modifier.size(78.dp),
                     shape = CircleShape,
                     colors = ButtonDefaults.buttonColors(
@@ -638,6 +648,70 @@ private fun ControlPanel(
             }
         }
     }
+}
+
+@Composable
+private fun CaptureQueueIndicator(queue: CaptureQueueState) {
+    Surface(
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        shape = RoundedCornerShape(8.dp),
+    ) {
+        Column(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 7.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    "撮影キュー",
+                    modifier = Modifier.weight(1f),
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold,
+                )
+                Text(
+                    when {
+                        queue.activeFilename != null -> "転送中"
+                        queue.waitingCount > 0 -> "確認中"
+                        queue.failedCount > 0 -> "完了・要確認"
+                        else -> "完了"
+                    },
+                    fontSize = 10.sp,
+                    color = if (queue.failedCount > 0) {
+                        MaterialTheme.colorScheme.error
+                    } else {
+                        MaterialTheme.colorScheme.primary
+                    },
+                )
+            }
+            queue.activeFilename?.let { filename ->
+                Text(
+                    filename,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    fontSize = 10.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                QueueMetric("待機", queue.waitingCount)
+                QueueMetric("転送中", if (queue.activeFilename != null) 1 else 0)
+                QueueMetric("保存済", queue.savedCount)
+                QueueMetric("失敗", queue.failedCount, error = queue.failedCount > 0)
+            }
+        }
+    }
+}
+
+@Composable
+private fun QueueMetric(label: String, count: Int, error: Boolean = false) {
+    Text(
+        "$label $count",
+        fontSize = 10.sp,
+        fontWeight = FontWeight.Medium,
+        color = if (error) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+    )
 }
 
 @Composable
@@ -841,6 +915,10 @@ private fun TipsDialog(
                         PhoneSaveFormat.RAW ->
                             "現在はRAW保存です。カード1/2からORFを探してスマホの専用日付フォルダへ保存します。"
                     },
+                )
+                TipSection(
+                    title = "撮影キュー",
+                    body = "本体シャッターの連写は待機列へ積み、1撮影ずつスマホへ保存します。待機・転送中・保存済み・失敗の件数は撮影コントロール内で確認できます。",
                 )
                 TipSection(
                     title = "カメラのカード設定",

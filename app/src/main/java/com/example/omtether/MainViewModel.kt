@@ -18,6 +18,7 @@ import com.example.omtether.camera.CameraController
 import com.example.omtether.camera.CameraIdentity
 import com.example.omtether.camera.CameraTransferProgress
 import com.example.omtether.camera.ExposureControl
+import com.example.omtether.camera.ExternalCaptureQueueProgress
 import com.example.omtether.camera.MockCameraController
 import com.example.omtether.camera.OmUsbCameraController
 import com.example.omtether.camera.PhoneSaveFormat
@@ -66,6 +67,28 @@ data class DisplayCalibration(
     val brightness: Float = 0f,
 )
 
+data class CaptureQueueState(
+    val waitingCount: Int = 0,
+    val activeFilename: String? = null,
+    val savedCount: Int = 0,
+    val failedCount: Int = 0,
+) {
+    val isBusy: Boolean
+        get() = waitingCount > 0 || activeFilename != null
+
+    val hasActivity: Boolean
+        get() = isBusy || savedCount > 0 || failedCount > 0
+
+    fun settleInterruptedTransfer(): CaptureQueueState {
+        val interruptedCount = waitingCount + if (activeFilename != null) 1 else 0
+        return copy(
+            waitingCount = 0,
+            activeFilename = null,
+            failedCount = failedCount + interruptedCount,
+        )
+    }
+}
+
 data class MainUiState(
     val phase: ConnectionPhase = ConnectionPhase.DISCONNECTED,
     val identity: CameraIdentity? = null,
@@ -84,6 +107,7 @@ data class MainUiState(
     val phoneSaveFormat: PhoneSaveFormat = PhoneSaveFormat.JPEG,
     val isCapturing: Boolean = false,
     val saveProgress: SaveProgress? = null,
+    val captureQueue: CaptureQueueState = CaptureQueueState(),
     val lastCapture: LastCapture? = null,
     val showConnectionGuide: Boolean = true,
     val showSetupGuide: Boolean = false,
@@ -118,7 +142,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var reviewJob: Job? = null
     private var captureJob: Job? = null
     private var externalCaptureEventJob: Job? = null
-    private var externalCaptureDebounceJob: Job? = null
+    private var externalCaptureDrainJob: Job? = null
     private var lifecycleJob: Job? = null
     private var liveViewWatchdogJob: Job? = null
     private var exposureSyncJob: Job? = null
@@ -229,6 +253,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun capture() {
         val requestedController = controller ?: return
+        if (mutableState.value.captureQueue.isBusy) return
         beginCaptureTransfer(requestedController, cameraSideShutter = false)
     }
 
@@ -238,6 +263,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     ) {
         if (captureJob?.isActive == true || mutableState.value.isCapturing) return
         val requestedSaveFormat = mutableState.value.phoneSaveFormat
+        var queueFailureReported = false
         val progressEstimator = TransferProgressEstimator()
         var lastProgressPublishedAt = 0L
         var lastProgressKey: String? = null
@@ -279,6 +305,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             it.copy(
                 isCapturing = true,
                 saveProgress = SaveProgress(SaveProgressStage.PREPARING),
+                captureQueue = if (cameraSideShutter) {
+                    it.captureQueue.copy(
+                        waitingCount = maxOf(1, it.captureQueue.waitingCount),
+                        activeFilename = null,
+                    )
+                } else {
+                    it.captureQueue
+                },
                 reviewBitmap = null,
                 reviewHighlightOverlay = null,
                 reviewHistogram = IntArray(256),
@@ -293,7 +327,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 },
             )
         }
-        captureJob = viewModelScope.launch {
+        // PTP GetObject and MediaStore writes are blocking operations. Running the queue
+        // worker on IO keeps Compose responsive while a RAW burst is transferred.
+        captureJob = viewModelScope.launch(Dispatchers.IO) {
             cameraOperationMutex.withLock {
                 if (controller !== requestedController) {
                     mutableState.update { it.copy(isCapturing = false, saveProgress = null) }
@@ -336,13 +372,28 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             saved += result
                             if (controller === requestedController) {
                                 mutableState.update {
-                                    it.copy(statusMessage = "保存中: ${saved.joinToString { file -> file.filename }}")
+                                    it.copy(
+                                        captureQueue = it.captureQueue.copy(
+                                            savedCount = it.captureQueue.savedCount + 1,
+                                        ),
+                                        statusMessage = "保存中: ${result.filename}（${saved.size}件完了）",
+                                    )
                                 }
                             }
                         } catch (error: CancellationException) {
                             throw error
                         } catch (error: Throwable) {
                             failures += "${item.filename}: ${error.userMessage()}"
+                            queueFailureReported = true
+                            if (controller === requestedController) {
+                                mutableState.update {
+                                    it.copy(
+                                        captureQueue = it.captureQueue.copy(
+                                            failedCount = it.captureQueue.failedCount + 1,
+                                        ),
+                                    )
+                                }
+                            }
                         }
                     }
                     val report = if (cameraSideShutter) {
@@ -356,6 +407,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                                     completedBytes = progress.bytesReceived,
                                     totalBytes = progress.totalBytes,
                                 )
+                            },
+                            onQueueProgress = { progress: ExternalCaptureQueueProgress ->
+                                if (progress.failedDelta > 0) queueFailureReported = true
+                                if (controller === requestedController) {
+                                    mutableState.update {
+                                        it.copy(
+                                            captureQueue = it.captureQueue.copy(
+                                                waitingCount = progress.waitingCaptures.coerceAtLeast(0),
+                                                activeFilename = progress.activeFilename,
+                                                failedCount = it.captureQueue.failedCount +
+                                                    progress.failedDelta.coerceAtLeast(0),
+                                            ),
+                                        )
+                                    }
+                                }
                             },
                             onObject = onObject,
                         )
@@ -376,16 +442,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     }
                     failures += report.warnings
                     if (controller === requestedController) {
+                        fun savedSummary(prefix: String): String = when (saved.size) {
+                            0 -> prefix
+                            1 -> "$prefix${saved.single().filename}"
+                            else -> "$prefix${saved.size}件（最後: ${saved.last().filename}）"
+                        }
                         val status = when {
                             saved.isEmpty() -> {
                                 val reason = failures.firstOrNull()?.take(120) ?: "保存可能な画像がありません"
                                 "保存失敗: $reason"
                             }
                             report.previewJpegFallbackUsed ->
-                                saved.joinToString(prefix = "保存完了: ") { it.filename } +
+                                savedSummary("保存完了: ") +
                                     "（プレビューJPEG・画質制限あり）"
-                            failures.isEmpty() -> saved.joinToString(prefix = "保存完了: ") { it.filename }
-                            else -> saved.joinToString(prefix = "一部保存完了: ") { it.filename } +
+                            failures.isEmpty() -> savedSummary("保存完了: ")
+                            else -> savedSummary("一部保存完了: ") +
                                 "（警告${failures.size}件）"
                         }
                         mutableState.update {
@@ -404,6 +475,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     throw error
                 } catch (error: Throwable) {
                     if (controller === requestedController) {
+                        if (cameraSideShutter && !queueFailureReported) {
+                            queueFailureReported = true
+                            mutableState.update {
+                                it.copy(
+                                    captureQueue = it.captureQueue.copy(
+                                        failedCount = it.captureQueue.failedCount + 1,
+                                    ),
+                                )
+                            }
+                        }
                         mutableState.update {
                             it.copy(
                                 statusMessage = if (cameraSideShutter) {
@@ -419,7 +500,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         if (requestedController !is MockCameraController && appInForeground) {
                             liveViewStartedAt = SystemClock.elapsedRealtime()
                         }
-                        mutableState.update { it.copy(isCapturing = false, saveProgress = null) }
+                        mutableState.update {
+                            it.copy(
+                                isCapturing = false,
+                                saveProgress = null,
+                                captureQueue = it.captureQueue.copy(
+                                    waitingCount = 0,
+                                    activeFilename = null,
+                                ),
+                            )
+                        }
                         scheduleReviewClear()
                     }
                 }
@@ -428,7 +518,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun setPhoneSaveFormat(format: PhoneSaveFormat) {
-        if (mutableState.value.isCapturing) return
+        if (mutableState.value.isCapturing || mutableState.value.captureQueue.isBusy) return
         preferences.edit().putString(KEY_PHONE_SAVE_FORMAT, format.name).apply()
         mutableState.update {
             it.copy(
@@ -444,6 +534,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun setExposure(propertyCode: Int, value: PtpScalar) {
+        if (mutableState.value.isCapturing || mutableState.value.captureQueue.isBusy) return
         val requestedController = controller ?: return
         viewModelScope.launch {
             cameraOperationMutex.withLock {
@@ -681,8 +772,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             exposureSyncJob = null
             externalCaptureEventJob?.cancel()
             externalCaptureEventJob = null
-            externalCaptureDebounceJob?.cancel()
-            externalCaptureDebounceJob = null
+            externalCaptureDrainJob?.cancel()
+            externalCaptureDrainJob = null
             frameCollectionJob?.cancel()
             frameCollectionJob = null
             analysisJob?.cancel()
@@ -720,6 +811,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     exposureSyncActive = false,
                     isCapturing = false,
                     saveProgress = null,
+                    captureQueue = it.captureQueue.settleInterruptedTransfer(),
                     showConnectionGuide = false,
                     liveViewIssue = null,
                     statusMessage = if (demo) "デモモード — カメラへ命令は送信しません" else "OM‑1 Mark IIへ接続しています…",
@@ -774,37 +866,45 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             if (
                                 controller !== newController ||
                                 generation != frameGeneration ||
-                                mutableState.value.phase == ConnectionPhase.ERROR ||
-                                mutableState.value.isCapturing
+                                mutableState.value.phase == ConnectionPhase.ERROR
                             ) {
                                 return@collect
                             }
-                            externalCaptureDebounceJob?.cancel()
-                            externalCaptureDebounceJob = viewModelScope.launch {
+                            mutableState.update {
+                                it.copy(
+                                    captureQueue = it.captureQueue.copy(
+                                        waitingCount = maxOf(1, it.captureQueue.waitingCount),
+                                    ),
+                                )
+                            }
+                            if (externalCaptureDrainJob?.isActive == true) return@collect
+                            externalCaptureDrainJob = viewModelScope.launch {
                                 delay(EXTERNAL_CAPTURE_DEBOUNCE_MS)
                                 while (
                                     controller === newController &&
                                     generation == frameGeneration &&
-                                    appInForeground &&
-                                    !firstFrameReady.isCompleted
+                                    mutableState.value.phase != ConnectionPhase.ERROR
                                 ) {
-                                    // Preserve a body-shutter event that arrives while the
-                                    // first JPEG is still being decoded. A timeout, leaving
-                                    // the foreground, or controller replacement ends the wait.
-                                    delay(EXTERNAL_CAPTURE_BUSY_RETRY_MS)
-                                }
-                                while (
-                                    controller === newController &&
-                                    generation == frameGeneration &&
-                                    mutableState.value.isCapturing
-                                ) {
+                                    val current = mutableState.value
+                                    if (
+                                        appInForeground &&
+                                        current.phase == ConnectionPhase.CONNECTED &&
+                                        current.liveBitmap != null &&
+                                        !current.isCapturing
+                                    ) {
+                                        break
+                                    }
+                                    // Keep one durable drain request while the first frame,
+                                    // a preceding transfer, or foreground resume is pending.
                                     delay(EXTERNAL_CAPTURE_BUSY_RETRY_MS)
                                 }
                                 if (
                                     controller === newController &&
                                     generation == frameGeneration &&
+                                    appInForeground &&
                                     mutableState.value.phase == ConnectionPhase.CONNECTED &&
-                                    mutableState.value.liveBitmap != null
+                                    mutableState.value.liveBitmap != null &&
+                                    !mutableState.value.isCapturing
                                 ) {
                                     beginCaptureTransfer(newController, cameraSideShutter = true)
                                 }
@@ -873,8 +973,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 frameCollectionJob = null
                 externalCaptureEventJob?.cancel()
                 externalCaptureEventJob = null
-                externalCaptureDebounceJob?.cancel()
-                externalCaptureDebounceJob = null
+                externalCaptureDrainJob?.cancel()
+                externalCaptureDrainJob = null
                 newController.forceClose()
                 rememberDiagnostics(newController)
                 if (controller === newController) controller = null
@@ -886,8 +986,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 frameCollectionJob = null
                 externalCaptureEventJob?.cancel()
                 externalCaptureEventJob = null
-                externalCaptureDebounceJob?.cancel()
-                externalCaptureDebounceJob = null
+                externalCaptureDrainJob?.cancel()
+                externalCaptureDrainJob = null
                 newController.forceClose()
                 rememberDiagnostics(newController)
                 if (controller === newController) controller = null
@@ -1185,8 +1285,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         exposureSyncJob = null
         externalCaptureEventJob?.cancel()
         externalCaptureEventJob = null
-        externalCaptureDebounceJob?.cancel()
-        externalCaptureDebounceJob = null
+        externalCaptureDrainJob?.cancel()
+        externalCaptureDrainJob = null
         captureJob?.cancel()
         captureJob = null
         lifecycleJob?.cancel()
@@ -1220,6 +1320,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 exposureSyncActive = false,
                 isCapturing = false,
                 saveProgress = null,
+                captureQueue = it.captureQueue.settleInterruptedTransfer(),
                 liveViewIssue = null,
                 usbCableAssessment = null,
                 statusMessage = "USBが切断されました。既に保存済みのファイルは保持されています",
@@ -1259,7 +1360,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         liveViewWatchdogJob?.cancel()
         exposureSyncJob?.cancel()
         externalCaptureEventJob?.cancel()
-        externalCaptureDebounceJob?.cancel()
+        externalCaptureDrainJob?.cancel()
         controller?.let { active ->
             rememberDiagnostics(active)
             active.forceClose()

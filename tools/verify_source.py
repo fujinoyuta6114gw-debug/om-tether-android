@@ -111,6 +111,10 @@ def main() -> int:
         "cancellation-safe USB suspends": "runCatchingNonCancellation",
         "retryable exposure initialization": "will retry after live view starts",
         "build-synchronized diagnostics": "BuildConfig.VERSION_NAME",
+        "multi-shot capture partitioning": "partitionCaptureBatches",
+        "bounded queue drain": "MAX_HANDLES_PER_QUEUE_DRAIN",
+        "capture queue UI": "CaptureQueueIndicator",
+        "off-main capture transfer": "viewModelScope.launch(Dispatchers.IO)",
     }
     for label, marker in required_markers.items():
         require(marker in kotlin_source, f"missing implementation marker: {label}")

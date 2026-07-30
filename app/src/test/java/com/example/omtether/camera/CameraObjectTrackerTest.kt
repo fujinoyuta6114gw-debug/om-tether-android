@@ -67,4 +67,18 @@ class CameraObjectTrackerTest {
         tracker.observeSnapshot(listOf(10L, 20L, 501L, 900L), queueForImport = true)
         assertEquals(listOf(501L), tracker.takePending())
     }
+
+    @Test
+    fun queueDrainLimitRetainsLaterBurstHandlesForNextPass() {
+        val tracker = CameraObjectTracker()
+        tracker.initialize(emptyList())
+        (1L..6L).forEach { handle ->
+            assertTrue(tracker.recordEvent(handle, queueForImport = true))
+        }
+
+        assertEquals(listOf(1L, 2L, 3L, 4L), tracker.takePending(maxCount = 4))
+        assertEquals(2, tracker.pendingCount())
+        assertEquals(listOf(5L, 6L), tracker.takePending(maxCount = 4))
+        assertEquals(0, tracker.pendingCount())
+    }
 }
