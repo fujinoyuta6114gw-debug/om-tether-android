@@ -646,6 +646,7 @@ private fun SaveProgressIndicator(progress: SaveProgress) {
         SaveProgressStage.PREPARING -> "撮影データを確認しています…"
         SaveProgressStage.DOWNLOADING -> "カメラから転送中"
         SaveProgressStage.WRITING -> "スマホへ保存中"
+        SaveProgressStage.FINALIZING -> "保存を最終処理中…"
     }
     val fraction = progress.fraction
     Surface(

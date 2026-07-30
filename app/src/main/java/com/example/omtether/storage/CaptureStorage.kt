@@ -23,13 +23,15 @@ class CaptureStorage(private val context: Context) {
     suspend fun saveOne(
         item: DownloadedObject,
         onProgress: (bytesWritten: Long, totalBytes: Long) -> Unit = { _, _ -> },
+        onFinalizing: () -> Unit = {},
     ): SavedObject = withContext(Dispatchers.IO) {
-        saveOneBlocking(item, onProgress)
+        saveOneBlocking(item, onProgress, onFinalizing)
     }
 
     private fun saveOneBlocking(
         item: DownloadedObject,
         onProgress: (bytesWritten: Long, totalBytes: Long) -> Unit,
+        onFinalizing: () -> Unit,
     ): SavedObject {
         require(item.bytes.isNotEmpty()) { "Refusing to save an empty camera object" }
         val resolver = context.contentResolver
@@ -61,6 +63,7 @@ class CaptureStorage(private val context: Context) {
                     offset += length
                     onProgress(offset.toLong(), item.bytes.size.toLong())
                 }
+                onFinalizing()
                 output.flush()
             } ?: error("MediaStore could not open $filename")
             val publishedRows = resolver.update(

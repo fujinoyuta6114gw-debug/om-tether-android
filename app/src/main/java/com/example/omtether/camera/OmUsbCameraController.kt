@@ -1076,6 +1076,13 @@ class OmUsbCameraController(
         onProgress: (CameraTransferProgress) -> Unit,
     ): DownloadedObject {
         val filename = candidate.info.filename.ifBlank { fallbackFilename(candidate.info.format) }
+        onProgress(
+            CameraTransferProgress(
+                filename = filename,
+                bytesReceived = 0L,
+                totalBytes = candidate.info.compressedSize,
+            ),
+        )
         val bytes = retryObjectRead("GetObject ${Ptp.hex32(candidate.handle)}") {
             requiredTransport().execute(
                 Ptp.GET_OBJECT,

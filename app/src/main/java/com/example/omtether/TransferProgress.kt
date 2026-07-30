@@ -6,6 +6,7 @@ enum class SaveProgressStage {
     PREPARING,
     DOWNLOADING,
     WRITING,
+    FINALIZING,
 }
 
 data class SaveProgress(
@@ -26,6 +27,7 @@ internal class TransferProgressEstimator {
     private var key: String? = null
     private var startedAtMs = 0L
     private var startedBytes = 0L
+    private var lastCompletedBytes = 0L
 
     fun update(
         stage: SaveProgressStage,
@@ -35,7 +37,7 @@ internal class TransferProgressEstimator {
         nowMs: Long,
     ): SaveProgress {
         val nextKey = "${stage.name}:$filename"
-        if (key != nextKey || nowMs < startedAtMs || completedBytes < startedBytes) {
+        if (key != nextKey || nowMs < startedAtMs || completedBytes < lastCompletedBytes) {
             key = nextKey
             startedAtMs = nowMs
             startedBytes = completedBytes.coerceAtLeast(0L)
@@ -56,6 +58,7 @@ internal class TransferProgressEstimator {
                     .toInt()
                     .coerceIn(1, MAX_REMAINING_SECONDS)
             }
+        lastCompletedBytes = safeCompleted
         return SaveProgress(
             stage = stage,
             filename = filename,

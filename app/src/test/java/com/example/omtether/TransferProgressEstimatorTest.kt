@@ -57,4 +57,23 @@ class TransferProgressEstimatorTest {
         assertNull(writing.bytesPerSecond)
         assertNull(writing.remainingSeconds)
     }
+
+    @Test
+    fun resetsEstimateWhenSameFileTransferRestarts() {
+        val estimator = TransferProgressEstimator()
+        estimator.update(SaveProgressStage.DOWNLOADING, "image.orf", 0L, 10_000L, 1_000L)
+        estimator.update(SaveProgressStage.DOWNLOADING, "image.orf", 6_000L, 10_000L, 2_000L)
+
+        val restarted = estimator.update(
+            SaveProgressStage.DOWNLOADING,
+            "image.orf",
+            0L,
+            10_000L,
+            2_100L,
+        )
+
+        assertNull(restarted.bytesPerSecond)
+        assertNull(restarted.remainingSeconds)
+        assertEquals(0f, restarted.fraction!!, 0.001f)
+    }
 }

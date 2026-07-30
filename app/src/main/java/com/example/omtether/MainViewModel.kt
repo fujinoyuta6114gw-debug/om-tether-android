@@ -241,6 +241,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val progressEstimator = TransferProgressEstimator()
         var lastProgressPublishedAt = 0L
         var lastProgressKey: String? = null
+        var lastProgressBytes = 0L
         fun publishProgress(
             stage: SaveProgressStage,
             filename: String,
@@ -252,9 +253,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             val completed = totalBytes > 0L && completedBytes >= totalBytes
             val progressKey = "${stage.name}:$filename"
             val stageChanged = progressKey != lastProgressKey
-            if (!stageChanged && !completed && now - lastProgressPublishedAt < PROGRESS_UPDATE_INTERVAL_MS) return
+            val transferRestarted = !stageChanged && completedBytes < lastProgressBytes
+            if (
+                !stageChanged &&
+                !transferRestarted &&
+                !completed &&
+                now - lastProgressPublishedAt < PROGRESS_UPDATE_INTERVAL_MS
+            ) {
+                return
+            }
             lastProgressPublishedAt = now
             lastProgressKey = progressKey
+            lastProgressBytes = completedBytes
             val progress = progressEstimator.update(
                 stage = stage,
                 filename = filename,
@@ -304,14 +314,25 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                                 completedBytes = 0L,
                                 totalBytes = item.bytes.size.toLong(),
                             )
-                            val result = storage.saveOne(item) { bytesWritten, totalBytes ->
-                                publishProgress(
-                                    stage = SaveProgressStage.WRITING,
-                                    filename = item.filename,
-                                    completedBytes = bytesWritten,
-                                    totalBytes = totalBytes,
-                                )
-                            }
+                            val result = storage.saveOne(
+                                item = item,
+                                onProgress = { bytesWritten, totalBytes ->
+                                    publishProgress(
+                                        stage = SaveProgressStage.WRITING,
+                                        filename = item.filename,
+                                        completedBytes = bytesWritten,
+                                        totalBytes = totalBytes,
+                                    )
+                                },
+                                onFinalizing = {
+                                    publishProgress(
+                                        stage = SaveProgressStage.FINALIZING,
+                                        filename = item.filename,
+                                        completedBytes = 0L,
+                                        totalBytes = 0L,
+                                    )
+                                },
+                            )
                             saved += result
                             if (controller === requestedController) {
                                 mutableState.update {
