@@ -45,6 +45,14 @@ data class CaptureHistoryItem(
     val id: String,
     val filename: String,
     val thumbnail: Bitmap?,
+    /**
+     * A bounded, display-oriented image used only by the focus review screen.
+     *
+     * The ViewModel keeps this for the newest two captures. Older history entries retain only
+     * [thumbnail], so a long tethered session does not accumulate full-size Bitmaps.
+     */
+    val focusReviewBitmap: Bitmap?,
+    val focusReviewUsesEmbeddedPreview: Boolean,
     val metadata: PhotoExifMetadata,
     val fileFormat: CaptureFileFormat,
     val isPreviewFallback: Boolean,

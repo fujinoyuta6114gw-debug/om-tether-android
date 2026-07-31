@@ -12,14 +12,17 @@ import kotlin.math.pow
 data class ExtractedPhotoMetadata(
     val metadata: PhotoExifMetadata,
     val thumbnail: Bitmap?,
+    val focusReviewBitmap: Bitmap?,
+    val focusReviewUsesEmbeddedPreview: Boolean,
     val warning: String? = null,
 )
 
 /**
  * Reads metadata from the exact JPEG/ORF byte array that is handed to Android storage.
  *
- * No live camera property is consulted here. A bounded thumbnail Bitmap is retained while the
- * original transfer byte array is allowed to be released after MediaStore finishes writing.
+ * No live camera property is consulted here. A bounded thumbnail and a bounded focus-review
+ * Bitmap are decoded while the original transfer byte array is available. The ViewModel keeps
+ * the larger Bitmap only for the newest two captures.
  */
 object PhotoMetadataExtractor {
     fun extract(item: DownloadedObject): ExtractedPhotoMetadata {
@@ -81,19 +84,35 @@ object PhotoMetadataExtractor {
             hasActualExif = requestedAttributesPresent,
         )
 
-        val thumbnailBytes = item.previewJpeg?.takeIf { it.isNotEmpty() }
+        val fullJpegAvailable = item.isJpeg()
+        val embeddedPreviewBytes = item.previewJpeg?.takeIf { it.isNotEmpty() }
             ?: runCatching { exif?.thumbnail }.getOrNull()?.takeIf { it.isNotEmpty() }
-            ?: item.bytes.takeIf { item.isJpeg() }
-        val thumbnail = try {
-            thumbnailBytes
+        val reviewBytes = if (fullJpegAvailable) item.bytes else embeddedPreviewBytes
+        val focusReviewUsesEmbeddedPreview = item.isPreviewFallback || !fullJpegAvailable
+        val focusReviewBitmap = try {
+            reviewBytes
                 ?.let {
                     ImageAnalysis.decodeJpeg(
                         bytes = it,
-                        maxDimension = HISTORY_THUMBNAIL_MAX_DIMENSION,
+                        maxDimension = FOCUS_REVIEW_MAX_DIMENSION,
                         preferredConfig = Bitmap.Config.RGB_565,
                     )
                 }
                 ?.let { bitmap -> orientThumbnail(bitmap, exif) }
+        } catch (_: Exception) {
+            null
+        }
+        val thumbnail = try {
+            focusReviewBitmap?.let(::createHistoryThumbnail)
+                ?: embeddedPreviewBytes
+                    ?.let {
+                        ImageAnalysis.decodeJpeg(
+                            bytes = it,
+                            maxDimension = HISTORY_THUMBNAIL_MAX_DIMENSION,
+                            preferredConfig = Bitmap.Config.RGB_565,
+                        )
+                    }
+                    ?.let { bitmap -> orientThumbnail(bitmap, exif) }
         } catch (_: Exception) {
             null
         }
@@ -106,6 +125,8 @@ object PhotoMetadataExtractor {
         return ExtractedPhotoMetadata(
             metadata = metadata,
             thumbnail = thumbnail,
+            focusReviewBitmap = focusReviewBitmap,
+            focusReviewUsesEmbeddedPreview = focusReviewUsesEmbeddedPreview,
             warning = warning,
         )
     }
@@ -186,5 +207,23 @@ object PhotoMetadataExtractor {
         }
     }
 
+    private fun createHistoryThumbnail(source: Bitmap): Bitmap {
+        val scale = minOf(
+            1f,
+            HISTORY_THUMBNAIL_MAX_DIMENSION.toFloat() /
+                maxOf(source.width, source.height).coerceAtLeast(1),
+        )
+        val width = (source.width * scale).toInt().coerceAtLeast(1)
+        val height = (source.height * scale).toInt().coerceAtLeast(1)
+        return if (width == source.width && height == source.height) {
+            source.copy(Bitmap.Config.RGB_565, false)
+        } else {
+            Bitmap.createScaledBitmap(source, width, height, true)
+        }
+    }
+
     private const val HISTORY_THUMBNAIL_MAX_DIMENSION = 240
+    // 3072 keeps a typical 5184px OM-1 JPEG at the decoder's 1/2 sample (2592px) while bounding
+    // each RGB_565 review image to roughly 14 MiB for unusual aspect ratios.
+    private const val FOCUS_REVIEW_MAX_DIMENSION = 3_072
 }

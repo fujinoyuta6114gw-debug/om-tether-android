@@ -51,6 +51,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -116,6 +117,10 @@ fun OmTetherApp(
 ) {
     var diagnosticsText by remember { mutableStateOf<String?>(null) }
     var showTips by remember { mutableStateOf(false) }
+    var focusReviewStartId by rememberSaveable { mutableStateOf<String?>(null) }
+    var rememberedFocusCenterX by rememberSaveable { mutableFloatStateOf(0.5f) }
+    var rememberedFocusCenterY by rememberSaveable { mutableFloatStateOf(0.5f) }
+    val newestFocusReview = state.captureHistory.firstOrNull { it.focusReviewBitmap != null }
     Surface(
         modifier = Modifier.fillMaxSize(),
         color = MaterialTheme.colorScheme.background,
@@ -152,6 +157,13 @@ fun OmTetherApp(
                             reviewing = state.reviewBitmap != null,
                             calibration = state.displayCalibration,
                             emptyMessage = state.liveViewIssue ?: "USB接続またはデモを開始してください",
+                            onFocusCheck = if (state.reviewBitmap != null) {
+                                newestFocusReview?.let { item ->
+                                    { focusReviewStartId = item.id }
+                                }
+                            } else {
+                                null
+                            },
                             modifier = Modifier.weight(1f).fillMaxHeight(),
                         )
                         ControlPanel(
@@ -180,6 +192,13 @@ fun OmTetherApp(
                             reviewing = state.reviewBitmap != null,
                             calibration = state.displayCalibration,
                             emptyMessage = state.liveViewIssue ?: "USB接続またはデモを開始してください",
+                            onFocusCheck = if (state.reviewBitmap != null) {
+                                newestFocusReview?.let { item ->
+                                    { focusReviewStartId = item.id }
+                                }
+                            } else {
+                                null
+                            },
                             modifier = Modifier.fillMaxWidth().weight(1f),
                         )
                         ControlPanel(
@@ -199,6 +218,7 @@ fun OmTetherApp(
                     history = state.captureHistory,
                     selectedId = state.selectedHistoryId,
                     onSelect = { onCaptureHistorySelect(it.id) },
+                    onFocusReview = { focusReviewStartId = it.id },
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(horizontal = 10.dp, vertical = 6.dp),
@@ -259,8 +279,28 @@ fun OmTetherApp(
             CaptureHistoryDetailDialog(
                 item = selected,
                 onDismiss = { onCaptureHistorySelect(null) },
+                onFocusReview = selected.focusReviewBitmap?.let {
+                    {
+                        onCaptureHistorySelect(null)
+                        focusReviewStartId = selected.id
+                    }
+                },
             )
         }
+
+    focusReviewStartId?.let { startId ->
+        FocusReviewDialog(
+            history = state.captureHistory,
+            startId = startId,
+            rememberedCenterX = rememberedFocusCenterX,
+            rememberedCenterY = rememberedFocusCenterY,
+            onRememberPosition = { x, y ->
+                rememberedFocusCenterX = x
+                rememberedFocusCenterY = y
+            },
+            onDismiss = { focusReviewStartId = null },
+        )
+    }
 }
 
 @Composable
@@ -380,6 +420,7 @@ internal fun PreviewPane(
     showNeutralTarget: Boolean = false,
     gesturesEnabled: Boolean = true,
     emptyMessage: String = "USB接続またはデモを開始してください",
+    onFocusCheck: (() -> Unit)? = null,
     modifier: Modifier = Modifier,
 ) {
     var scale by remember { mutableFloatStateOf(1f) }
@@ -472,6 +513,15 @@ internal fun PreviewPane(
                     TextButton(onClick = { scale = 1f; offset = Offset.Zero }) { Text("リセット") }
                 }
             }
+            if (reviewing && onFocusCheck != null) {
+                Button(
+                    onClick = onFocusCheck,
+                    modifier = Modifier.align(Alignment.BottomEnd).padding(9.dp),
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 7.dp),
+                ) {
+                    Text("ピント確認", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                }
+            }
         }
     }
 }
@@ -501,10 +551,11 @@ private fun CaptureHistoryStrip(
     history: List<CaptureHistoryItem>,
     selectedId: String?,
     onSelect: (CaptureHistoryItem) -> Unit,
+    onFocusReview: (CaptureHistoryItem) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     Surface(
-        modifier = modifier.height(94.dp),
+        modifier = modifier.height(104.dp),
         shape = RoundedCornerShape(12.dp),
         color = MaterialTheme.colorScheme.surface,
         tonalElevation = 2.dp,
@@ -520,10 +571,19 @@ private fun CaptureHistoryStrip(
                     fontSize = 12.sp,
                     fontWeight = FontWeight.Bold,
                 )
+                history.firstOrNull { it.focusReviewBitmap != null }?.let { latest ->
+                    TextButton(
+                        onClick = { onFocusReview(latest) },
+                        modifier = Modifier.height(27.dp),
+                        contentPadding = PaddingValues(horizontal = 8.dp),
+                    ) {
+                        Text("ピント確認", fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                    }
+                }
                 Text(
-                    "直近 ${history.size}/20枚 · タップで実EXIF",
+                    "${history.size}/20 · タップでEXIF",
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    fontSize = 10.sp,
+                    fontSize = 9.sp,
                 )
             }
             LazyRow(
@@ -632,6 +692,7 @@ private fun CaptureHistoryThumbnail(
 private fun CaptureHistoryDetailDialog(
     item: CaptureHistoryItem,
     onDismiss: () -> Unit,
+    onFocusReview: (() -> Unit)? = null,
 ) {
     val metadata = item.metadata
     AlertDialog(
@@ -749,7 +810,12 @@ private fun CaptureHistoryDetailDialog(
             }
         },
         confirmButton = {
-            TextButton(onClick = onDismiss) { Text("閉じる") }
+            Row {
+                onFocusReview?.let { openFocusReview ->
+                    TextButton(onClick = openFocusReview) { Text("ピント確認") }
+                }
+                TextButton(onClick = onDismiss) { Text("閉じる") }
+            }
         },
     )
 }
@@ -1226,6 +1292,10 @@ private fun TipsDialog(
                 TipSection(
                     title = "撮影キュー",
                     body = "本体シャッターの連写は待機列へ積み、1撮影ずつスマホへ保存します。待機・転送中・保存済み・失敗の件数は撮影コントロール内で確認できます。",
+                )
+                TipSection(
+                    title = "ピント確認",
+                    body = "撮影直後または履歴の「ピント確認」から、最新2枚を100％表示で比較できます。前回位置・中央・顔・任意位置へ移動でき、フォーカスマスクは感度を調整できます。マスクはコントラストの補助表示で、合焦を保証するものではありません。",
                 )
                 TipSection(
                     title = "カメラのカード設定",

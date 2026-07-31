@@ -27,13 +27,19 @@ def main() -> int:
         APP_SOURCE / "java" / "com" / "example" / "omtether" / "camera" / "OmUsbCameraController.kt",
         APP_SOURCE / "java" / "com" / "example" / "omtether" / "history" / "CaptureHistory.kt",
         APP_SOURCE / "java" / "com" / "example" / "omtether" / "history" / "PhotoMetadataExtractor.kt",
+        APP_SOURCE / "java" / "com" / "example" / "omtether" / "focus" / "FocusMaskAnalysis.kt",
+        APP_SOURCE / "java" / "com" / "example" / "omtether" / "focus" / "FocusViewportMath.kt",
+        APP_SOURCE / "java" / "com" / "example" / "omtether" / "focus" / "FaceRegionDetector.kt",
         APP_SOURCE / "java" / "com" / "example" / "omtether" / "storage" / "CapturePathPolicy.kt",
         APP_SOURCE / "java" / "com" / "example" / "omtether" / "ui" / "OmTetherApp.kt",
+        APP_SOURCE / "java" / "com" / "example" / "omtether" / "ui" / "FocusReviewDialog.kt",
         ROOT / "app" / "src" / "test" / "java" / "com" / "example" / "omtether" / "SetupGuidePolicyTest.kt",
         ROOT / "app" / "src" / "test" / "java" / "com" / "example" / "omtether" / "camera" / "CaptureSavePolicyTest.kt",
         ROOT / "app" / "src" / "test" / "java" / "com" / "example" / "omtether" / "camera" / "CameraObjectTrackerTest.kt",
         ROOT / "app" / "src" / "test" / "java" / "com" / "example" / "omtether" / "history" / "CameraStorageSlotTest.kt",
         ROOT / "app" / "src" / "test" / "java" / "com" / "example" / "omtether" / "history" / "PhotoMetadataFormatterTest.kt",
+        ROOT / "app" / "src" / "test" / "java" / "com" / "example" / "omtether" / "focus" / "FocusMaskAnalysisTest.kt",
+        ROOT / "app" / "src" / "test" / "java" / "com" / "example" / "omtether" / "focus" / "FocusViewportMathTest.kt",
         ROOT / "app" / "src" / "test" / "java" / "com" / "example" / "omtether" / "storage" / "CapturePathPolicyTest.kt",
     ]
     for path in required_files:
@@ -124,6 +130,13 @@ def main() -> int:
         "capture history strip": "CaptureHistoryStrip",
         "camera card source tracking": "CameraStorageSlot.fromStorageId",
         "history save failure state": "SmartphoneSaveState.FAILED",
+        "post-capture focus review": "FocusReviewDialog",
+        "one image pixel display geometry": "oneToOneZoom",
+        "remembered normalized focus position": "前回位置",
+        "bounded focus mask analysis": "MAX_ANALYSIS_DIMENSION = 1_024",
+        "offline face jump detection": "FaceRegionDetector.detect",
+        "two-image focus comparison": "MAX_COMPARISON_IMAGES = 2",
+        "bounded high-resolution focus history": "MAX_FOCUS_REVIEW_IMAGES = 2",
     }
     for label, marker in required_markers.items():
         require(marker in kotlin_source, f"missing implementation marker: {label}")

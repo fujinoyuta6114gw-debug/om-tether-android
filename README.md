@@ -1,4 +1,4 @@
-# OM Tether for Android — USB-C prototype v0.5.0
+# OM Tether for Android — USB-C prototype v0.6.0
 
 OM SYSTEM OM‑1 Mark IIをAndroid端末からUSB-Cでテザー撮影するための、非公式の試作アプリです。撮影現場で必要になる表示・保存・画像確認を先に実装し、カメラ固有のUSB応答は診断ログで追える構成にしています。
 
@@ -11,11 +11,25 @@ OM SYSTEM OM‑1 Mark IIをAndroid端末からUSB-Cでテザー撮影するた�
 - カメラのカード1／カード2を横断したJPEG／ORFオブジェクト取得
 - Androidの `Pictures/OM Tether/yyyy-MM-dd` への自動保存
 - 直近20枚のサムネイル履歴と、保存対象JPEG／ORF本体から読み取った撮影EXIFの詳細表示
+- 撮影直後の100％ピント確認、位置記憶、フォーカスマスク、顔／中央／任意位置ジャンプ、最新2枚比較
 - ライブビューのピンチ拡大、輝度ヒストグラム、白飛び警告オーバーレイ
 - 絞り・シャッター・ISO・露出補正・ホワイトバランスの列挙値読み取り、定期同期、変更
 - カメラなしでUIとJPEG保存を確認できるデモモード
 - USBトランザクションとカメラ能力をコピーできる診断画面
 - 初回起動時の撮影前ガイド（端末設定、USB接続、グレーカード判定、表示微調整）
+
+## v0.6.0のピント確認モード
+
+- 撮影プレビューまたは履歴上部の「ピント確認」から、撮影後画像をワンタップで100％表示
+- 前回閉じた正規化位置を次の撮影でも復元し、構図が少し変わっても同じ場所を確認
+- 中央、任意タップ位置、端末内で検出した顔周辺へ100％のままジャンプ
+- 最新2枚を左右ボタンで切り替え、同じ拡大位置のまま比較
+- Sobel勾配と画像ごとの分位しきい値からフォーカスマスクを作成し、感度を11段階で調整
+- マスクと顔検出をバックグラウンド実行し、USB転送／Compose UIスレッドから分離
+- JPEGは保存対象本体、ORFはカメラ内蔵プレビューを確認画像として使用し、画面下へ種別と解像度を明記
+- 100％は保持した確認画像の1pxを画面1pxへ対応。フォーカスマスクは合焦保証ではなく高コントラスト部の補助表示
+- 長辺最大3072pxのRGB_565確認画像は最新2枚だけ保持し、3枚目以降は従来の240px履歴サムネイルだけ残してメモリを制限
+- カメラへの追加命令は行わず、撮影済み画像のAndroid側解析だけで動作
 
 ## v0.5.0の撮影履歴・実EXIF
 
@@ -212,7 +226,7 @@ OM SYSTEM OM‑1 Mark IIをAndroid端末からUSB-Cでテザー撮影するた�
 
 ### GitHub ActionsでAPKを作る
 
-`.github/workflows/build-apk.yml` を同梱しています。GitHubの `main` ブランチへ配置すると、ソース検証、JVM単体テスト、debug APK生成を自動実行します。成功時の成果物名は `OM-Tether-v0.5.0-debug` で、中に `app-debug.apk` が入ります。
+`.github/workflows/build-apk.yml` を同梱しています。GitHubの `main` ブランチへ配置すると、ソース検証、JVM単体テスト、debug APK生成を自動実行します。成功時の成果物名は `OM-Tether-v0.6.0-debug` で、中に `app-debug.apk` が入ります。
 
 このAPKは初期動作確認用のdebugビルドです。Google Play配布用のrelease署名APKではありません。
 
@@ -255,6 +269,8 @@ Pictures/OM Tether/2026-07-23/P7230001.ORF
 - [OM‑1 Mark II USB接続モード説明](https://learning.omsystem.com/OM-1MarkII/zz_html_manual/en/usb_settings_251.html)
 - [Android USB host API](https://developer.android.com/develop/connectivity/usb/host)
 - [AndroidX ExifInterface](https://developer.android.com/reference/androidx/exifinterface/media/ExifInterface)
+- [Capture One公式：The Focus Mask](https://support.captureone.com/hc/en-us/articles/360002473597-The-Focus-Mask)
+- [Capture One公式：Focus Tool (AI Snap to Eye)](https://support.captureone.com/hc/en-us/articles/360002477058-Focus-Tool-AI-Snap-to-Eye)
 - [libgphoto2ソースとリリース情報](https://github.com/gphoto/libgphoto2)
 
 プロトコル上の採用値と出典は [docs/PROTOCOL_NOTES.md](docs/PROTOCOL_NOTES.md) に分離しています。

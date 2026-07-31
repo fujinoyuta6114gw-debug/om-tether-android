@@ -579,6 +579,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             id = historyId,
             filename = item.filename,
             thumbnail = extracted.thumbnail,
+            focusReviewBitmap = extracted.focusReviewBitmap,
+            focusReviewUsesEmbeddedPreview = extracted.focusReviewUsesEmbeddedPreview,
             metadata = extracted.metadata,
             fileFormat = PhotoMetadataExtractor.fileFormat(item),
             isPreviewFallback = item.isPreviewFallback,
@@ -590,6 +592,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         mutableState.update { current ->
             val retained = (listOf(historyItem) + current.captureHistory)
                 .take(MAX_CAPTURE_HISTORY_ITEMS)
+                .mapIndexed { index, retainedItem ->
+                    if (
+                        index >= MAX_FOCUS_REVIEW_IMAGES &&
+                        retainedItem.focusReviewBitmap != null
+                    ) {
+                        retainedItem.copy(focusReviewBitmap = null)
+                    } else {
+                        retainedItem
+                    }
+                }
             current.copy(
                 captureHistory = retained,
                 selectedHistoryId = current.selectedHistoryId
@@ -1511,6 +1523,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         private const val LIVE_PREVIEW_MAX_DIMENSION = 1_024
         private const val CAPTURE_PREVIEW_MAX_DIMENSION = 2_048
         private const val MAX_CAPTURE_HISTORY_ITEMS = 20
+        private const val MAX_FOCUS_REVIEW_IMAGES = 2
         private const val PREFERENCES_NAME = "display_calibration"
         private const val KEY_SETUP_COMPLETE = "setup_complete"
         private const val KEY_TEMPERATURE = "temperature"
